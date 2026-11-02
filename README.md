@@ -6,7 +6,8 @@ Build `SolidsFromPolylines.csproj`. The build creates
 `bin/Debug/SolidsFromPolylines.bundle`. Copy that entire `.bundle` folder into
 `%AppData%\Autodesk\ApplicationPlugins`, then restart Civil 3D. The plug-in
 loads automatically and creates a **Solids** ribbon tab with a button for each
-command. No manual ribbon customization is needed.
+command. The ribbon icons are embedded in the DLL. No manual ribbon
+customization is needed.
 
 A DLL by itself does not make Civil 3D load a plug-in just because it is copied
 to an arbitrary add-in folder. For automatic loading, install the generated

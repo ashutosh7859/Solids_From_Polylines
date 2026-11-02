@@ -3,9 +3,11 @@
 using System;
 using System.Collections;
 using System.Diagnostics;
+using System.IO;
 using System.Reflection;
 using Autodesk.AutoCAD.ApplicationServices;
 using System.Windows.Input;
+using System.Windows.Media.Imaging;
 
 namespace SolidsFromPolylines
 {
@@ -108,13 +110,17 @@ namespace SolidsFromPolylines
 
             GetCollection(tab, "Panels").Add(panel);
             GetCollection(panelSource, "Items").Add(CreateButton(
-                ribbonAssembly, "Prepare\nMarkings", "MARKING_PREP"));
+                ribbonAssembly, "Prepare\nMarkings", "MARKING_PREP",
+                "01_prepare_markings"));
             GetCollection(panelSource, "Items").Add(CreateButton(
-                ribbonAssembly, "Create\nSolids", "MARKING_SOLIDS"));
+                ribbonAssembly, "Create\nSolids", "MARKING_SOLIDS",
+                "02_create_solids"));
             GetCollection(panelSource, "Items").Add(CreateButton(
-                ribbonAssembly, "Block\nSolids", "MARKING_BLOCK"));
+                ribbonAssembly, "Block\nSolids", "MARKING_BLOCK",
+                "03_block_solids"));
             GetCollection(panelSource, "Items").Add(CreateButton(
-                ribbonAssembly, "Assign\nBlock Layer", "MARKING_BLOCK_LAYER"));
+                ribbonAssembly, "Assign\nBlock Layer", "MARKING_BLOCK_LAYER",
+                "04_assign_block_layer"));
 
             ribbonTabs.Add(tab);
             ribbonTab = tab;
@@ -124,16 +130,36 @@ namespace SolidsFromPolylines
         private static object CreateButton(
             Assembly ribbonAssembly,
             string text,
-            string commandName)
+            string commandName,
+            string iconName)
         {
             object button = CreateRibbonObject(ribbonAssembly, "RibbonButton");
             SetProperty(button, "Text", text);
             SetProperty(button, "ShowText", true);
+            SetProperty(button, "SmallImage", LoadIcon($"{iconName}_16.png"));
+            SetProperty(button, "LargeImage", LoadIcon($"{iconName}_32.png"));
             string command = $"_.{commandName} ";
             SetProperty(button, "CommandParameter", command);
             SetProperty(button, "CommandHandler", new RibbonCommandHandler(command));
             SetEnumProperty(button, "Size", "Large");
             return button;
+        }
+
+        private static BitmapImage LoadIcon(string fileName)
+        {
+            string resourceName = $"SolidsFromPolylines.{fileName}";
+            using Stream stream = typeof(SolidsRibbon).Assembly
+                .GetManifestResourceStream(resourceName)
+                ?? throw new InvalidOperationException(
+                    $"Embedded ribbon icon '{resourceName}' was not found.");
+
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.StreamSource = stream;
+            image.EndInit();
+            image.Freeze();
+            return image;
         }
 
         private static IList GetCollection(object target, string propertyName)
