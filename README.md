@@ -2,13 +2,18 @@
 
 AutoCAD Civil 3D .NET plug-in targeting `net8.0-windows`.
 
-Build `SolidsFromPolylines.csproj`. In Civil 3D, run `NETLOAD` and load
-`Solids_From_Polylines/bin/Debug/SolidsFromPolylines.dll` from the workspace.
-Then enter `MARKING_PREP`, `MARKING_SOLIDS`, `MARKING_BLOCK`, or
-`MARKING_BLOCK_LAYER` at the Civil 3D command line.
+Build `SolidsFromPolylines.csproj`. The build creates
+`bin/Debug/SolidsFromPolylines.bundle`. Copy that entire `.bundle` folder into
+`%AppData%\Autodesk\ApplicationPlugins`, then restart Civil 3D. The plug-in
+loads automatically and creates a **Solids** ribbon tab with a button for each
+command. No manual ribbon customization is needed.
 
-These are command-line commands; this project does not add ribbon buttons or
-toolbar icons.
+A DLL by itself does not make Civil 3D load a plug-in just because it is copied
+to an arbitrary add-in folder. For automatic loading, install the generated
+`.bundle` folder under `ApplicationPlugins`. For a one-time manual load, use
+`NETLOAD` to select the DLL; the Solids tab is created when the ribbon is ready.
+Commands remain available by name at the Civil 3D command line:
+`MARKING_PREP`, `MARKING_SOLIDS`, `MARKING_BLOCK`, and `MARKING_BLOCK_LAYER`.
 
 ## Commands
 

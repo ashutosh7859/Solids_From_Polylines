@@ -26,10 +26,12 @@ namespace SolidsFromPolylines
             document?.Editor.WriteMessage(
                 "\nSolidsFromPolylines loaded. Commands: MARKING_PREP, " +
                 "MARKING_SOLIDS, MARKING_BLOCK, MARKING_BLOCK_LAYER.");
+            SolidsRibbon.Initialize();
         }
 
         public void Terminate()
         {
+            SolidsRibbon.Terminate();
         }
 
         [CommandMethod("MARKING_PREP")]

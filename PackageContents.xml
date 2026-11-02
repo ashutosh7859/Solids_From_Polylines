@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ApplicationPackage
+  SchemaVersion="1.0"
+  AppVersion="1.0.0"
+  ProductCode="{F1A847B2-11D9-4E95-A6C8-1E90CB8D4D3B}"
+  Name="Solids From Polylines"
+  Description="Creates marking boundaries and solids from polylines.">
+  <CompanyDetails Name="Solids From Polylines" />
+  <Components>
+    <RuntimeRequirements
+      OS="Win64"
+      Platform="AutoCAD*"
+      SeriesMin="R25.0"
+      SeriesMax="R25.0" />
+    <ComponentEntry
+      AppName="SolidsFromPolylines"
+      ModuleName="./Contents/Windows/SolidsFromPolylines.dll"
+      LoadOnAutoCADStartup="True" />
+  </Components>
+</ApplicationPackage>

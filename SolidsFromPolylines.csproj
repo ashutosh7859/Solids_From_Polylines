@@ -31,4 +31,16 @@
       <Private>False</Private>
     </Reference>
   </ItemGroup>
+  <Target Name="PackageCivil3DAddinBundle" AfterTargets="Build">
+    <PropertyGroup>
+      <Civil3DBundleDir>$(TargetDir)SolidsFromPolylines.bundle</Civil3DBundleDir>
+    </PropertyGroup>
+    <MakeDir Directories="$(Civil3DBundleDir)\Contents\Windows" />
+    <Copy
+      SourceFiles="$(TargetPath)"
+      DestinationFiles="$(Civil3DBundleDir)\Contents\Windows\SolidsFromPolylines.dll" />
+    <Copy
+      SourceFiles="$(MSBuildProjectDirectory)\PackageContents.xml"
+      DestinationFiles="$(Civil3DBundleDir)\PackageContents.xml" />
+  </Target>
 </Project>
