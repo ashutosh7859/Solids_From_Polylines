@@ -86,18 +86,6 @@ namespace SolidsFromPolylines
             }
 
             ribbonTabs = GetCollection(ribbon, "Tabs");
-            for (int index = ribbonTabs.Count - 1; index >= 0; index--)
-            {
-                object existingTab = ribbonTabs[index]!;
-                if (string.Equals(
-                    GetProperty(existingTab, "Id") as string,
-                    TabId,
-                    StringComparison.Ordinal))
-                {
-                    ribbonTabs.RemoveAt(index);
-                }
-            }
-
             object tab = CreateRibbonObject(ribbonAssembly, "RibbonTab");
             SetProperty(tab, "Id", TabId);
             SetProperty(tab, "Title", "Solids");
@@ -122,6 +110,18 @@ namespace SolidsFromPolylines
                 ribbonAssembly, "Assign\nBlock Layer", "MARKING_BLOCK_LAYER",
                 "04_assign_block_layer"));
 
+            for (int index = ribbonTabs.Count - 1; index >= 0; index--)
+            {
+                object existingTab = ribbonTabs[index]!;
+                if (string.Equals(
+                    GetProperty(existingTab, "Id") as string,
+                    TabId,
+                    StringComparison.Ordinal))
+                {
+                    ribbonTabs.RemoveAt(index);
+                }
+            }
+
             ribbonTabs.Add(tab);
             ribbonTab = tab;
             return true;
@@ -136,13 +136,31 @@ namespace SolidsFromPolylines
             object button = CreateRibbonObject(ribbonAssembly, "RibbonButton");
             SetProperty(button, "Text", text);
             SetProperty(button, "ShowText", true);
-            SetProperty(button, "SmallImage", LoadIcon($"{iconName}_16.png"));
-            SetProperty(button, "LargeImage", LoadIcon($"{iconName}_32.png"));
+            TrySetIcon(button, "SmallImage", $"{iconName}_16.png");
+            TrySetIcon(button, "LargeImage", $"{iconName}_32.png");
             string command = $"_.{commandName} ";
             SetProperty(button, "CommandParameter", command);
             SetProperty(button, "CommandHandler", new RibbonCommandHandler(command));
             SetEnumProperty(button, "Size", "Large");
             return button;
+        }
+
+        private static void TrySetIcon(
+            object button,
+            string propertyName,
+            string fileName)
+        {
+            try
+            {
+                SetProperty(button, propertyName, LoadIcon(fileName));
+            }
+            catch (Exception exception)
+            {
+                Report(
+                    $"Unable to set ribbon icon '{fileName}' on " +
+                    $"'{propertyName}': {exception.Message}");
+                Trace.TraceError(exception.ToString());
+            }
         }
 
         private static BitmapImage LoadIcon(string fileName)
@@ -160,6 +178,19 @@ namespace SolidsFromPolylines
             image.EndInit();
             image.Freeze();
             return image;
+        }
+
+        private static void Report(string message)
+        {
+            var editor = Application.DocumentManager.MdiActiveDocument?.Editor;
+            if (editor != null)
+            {
+                editor.WriteMessage($"\n{message}");
+            }
+            else
+            {
+                Trace.TraceWarning(message);
+            }
         }
 
         private static IList GetCollection(object target, string propertyName)
