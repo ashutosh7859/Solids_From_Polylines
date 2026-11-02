@@ -142,7 +142,6 @@ namespace SolidsFromPolylines
             SetProperty(button, "Text", text);
             SetProperty(button, "ShowText", true);
             TrySetProperty(button, "ToolTip", toolTip);
-            TrySetIcon(button, "SmallImage", $"{iconName}_16.png");
             TrySetIcon(button, "LargeImage", $"{iconName}_32.png");
             string command = $"_.{commandName} ";
             SetProperty(button, "CommandParameter", command);

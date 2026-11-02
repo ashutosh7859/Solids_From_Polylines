@@ -11,7 +11,7 @@
     <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
   </PropertyGroup>
   <ItemGroup>
-    <EmbeddedResource Include="Icons\*.png">
+    <EmbeddedResource Include="Icons\*_32.png">
       <LogicalName>SolidsFromPolylines.%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
     <Reference Include="acdbmgd">
