@@ -129,8 +129,9 @@ namespace SolidsFromPolylines
             object button = CreateRibbonObject(ribbonAssembly, "RibbonButton");
             SetProperty(button, "Text", text);
             SetProperty(button, "ShowText", true);
-            SetProperty(button, "CommandParameter", $"_.{commandName} ");
-            SetProperty(button, "CommandHandler", new RibbonCommandHandler());
+            string command = $"_.{commandName} ";
+            SetProperty(button, "CommandParameter", command);
+            SetProperty(button, "CommandHandler", new RibbonCommandHandler(command));
             SetEnumProperty(button, "Size", "Large");
             return button;
         }
@@ -189,6 +190,13 @@ namespace SolidsFromPolylines
 
         private sealed class RibbonCommandHandler : ICommand
         {
+            private readonly string command;
+
+            public RibbonCommandHandler(string command)
+            {
+                this.command = command;
+            }
+
             public bool CanExecute(object? parameter)
             {
                 return true;
@@ -196,13 +204,6 @@ namespace SolidsFromPolylines
 
             public void Execute(object? parameter)
             {
-                if (parameter is not string command)
-                {
-                    throw new ArgumentException(
-                        "A command name is required for a Solids ribbon button.",
-                        nameof(parameter));
-                }
-
                 var document = Application.DocumentManager.MdiActiveDocument;
                 if (document == null)
                 {
@@ -211,7 +212,17 @@ namespace SolidsFromPolylines
                     return;
                 }
 
-                document.SendStringToExecute(command, true, false, true);
+                try
+                {
+                    document.SendStringToExecute(command, true, false, true);
+                }
+                catch (Exception exception)
+                {
+                    document.Editor.WriteMessage(
+                        $"\nUnable to start ribbon command '{command.Trim()}': " +
+                        exception.Message);
+                    Trace.TraceError(exception.ToString());
+                }
             }
 
             public event EventHandler? CanExecuteChanged
