@@ -99,16 +99,20 @@ namespace SolidsFromPolylines
             GetCollection(tab, "Panels").Add(panel);
             GetCollection(panelSource, "Items").Add(CreateButton(
                 ribbonAssembly, "Prepare\nMarkings", "MARKING_PREP",
-                "01_prepare_markings"));
+                "01_prepare_markings",
+                "Create closed marking boundaries from selected polylines."));
             GetCollection(panelSource, "Items").Add(CreateButton(
                 ribbonAssembly, "Create\nSolids", "MARKING_SOLIDS",
-                "02_create_solids"));
+                "02_create_solids",
+                "Create 3D solids from marking boundaries on a selected surface."));
             GetCollection(panelSource, "Items").Add(CreateButton(
                 ribbonAssembly, "Block\nSolids", "MARKING_BLOCK",
-                "03_block_solids"));
+                "03_block_solids",
+                "Combine model-space solids on the selected solid's layer into a block."));
             GetCollection(panelSource, "Items").Add(CreateButton(
                 ribbonAssembly, "Assign\nBlock Layer", "MARKING_BLOCK_LAYER",
-                "04_assign_block_layer"));
+                "04_assign_block_layer",
+                "Change the layer of selected block references and optionally their contents."));
 
             for (int index = ribbonTabs.Count - 1; index >= 0; index--)
             {
@@ -131,11 +135,13 @@ namespace SolidsFromPolylines
             Assembly ribbonAssembly,
             string text,
             string commandName,
-            string iconName)
+            string iconName,
+            string toolTip)
         {
             object button = CreateRibbonObject(ribbonAssembly, "RibbonButton");
             SetProperty(button, "Text", text);
             SetProperty(button, "ShowText", true);
+            TrySetProperty(button, "ToolTip", toolTip);
             TrySetIcon(button, "SmallImage", $"{iconName}_16.png");
             TrySetIcon(button, "LargeImage", $"{iconName}_32.png");
             string command = $"_.{commandName} ";
@@ -143,6 +149,24 @@ namespace SolidsFromPolylines
             SetProperty(button, "CommandHandler", new RibbonCommandHandler(command));
             SetEnumProperty(button, "Size", "Large");
             return button;
+        }
+
+        private static void TrySetProperty(
+            object target,
+            string propertyName,
+            object value)
+        {
+            try
+            {
+                SetProperty(target, propertyName, value);
+            }
+            catch (Exception exception)
+            {
+                Report(
+                    $"Unable to set ribbon property '{propertyName}': " +
+                    exception.Message);
+                Trace.TraceError(exception.ToString());
+            }
         }
 
         private static void TrySetIcon(
