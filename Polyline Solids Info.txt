@@ -1,0 +1,11 @@
+MARKING_PREP
+Creates closed marking boundaries from horizontal lightweight polylines with positive constant width. Choose continuous or dashed; dashed output needs positive dash and gap lengths. Unsupported paths are kept for review.
+
+MARKING_SOLIDS
+Extrudes marking boundaries into 3D solids using a selected Civil 3D surface. Requires valid closed boundaries and a surface; nested boundaries become cutouts.
+
+MARKING_BLOCK
+Combines all Model Space 3D solids on the selected solid's layer into one block, based at the origin.
+
+MARKING_BLOCK_LAYER
+Moves selected block references to an existing or new layer. Optionally changes their contents' layers; dynamic blocks and external references are skipped.
