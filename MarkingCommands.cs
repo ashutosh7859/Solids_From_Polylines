@@ -315,18 +315,6 @@ namespace SolidsFromPolylines
                         first.WidthLabel, second.WidthLabel);
             });
 
-            HashSet<ObjectId> overlappingIds = FindOverlappingPolylines(
-                document.Database, sourceIds);
-            foreach (ObjectId overlappingId in overlappingIds)
-            {
-                if (groupByObjectId.TryGetValue(
-                        overlappingId, out BatchPreparationGroup group))
-                {
-                    group.AddException(
-                        overlappingId, "overlap needs review");
-                }
-            }
-
             using (var dialog = new BatchPreparationDialog(groups))
             {
                 if (Autodesk.AutoCAD.ApplicationServices.Application
@@ -334,6 +322,59 @@ namespace SolidsFromPolylines
                 {
                     return;
                 }
+            }
+
+            var includedGroups = new List<BatchPreparationGroup>();
+            var includedIds = new List<ObjectId>();
+            foreach (BatchPreparationGroup group in groups)
+            {
+                if (!group.Included)
+                {
+                    continue;
+                }
+
+                includedGroups.Add(group);
+                includedIds.AddRange(group.EligibleIds);
+            }
+
+            HashSet<ObjectId> overlappingIds = FindOverlappingPolylines(
+                document.Database, includedIds);
+            foreach (ObjectId overlappingId in overlappingIds)
+            {
+                if (groupByObjectId.TryGetValue(
+                        overlappingId, out BatchPreparationGroup group))
+                {
+                    group.AddException(overlappingId, "overlap needs review");
+                }
+            }
+
+            int readyCount = 0;
+            int exceptionCount = 0;
+            int dashedGroupCount = 0;
+            foreach (BatchPreparationGroup group in includedGroups)
+            {
+                readyCount += group.EligibleIds.Count;
+                exceptionCount += group.Exceptions.Count;
+                if (group.Dashed && group.EligibleIds.Count > 0)
+                {
+                    dashedGroupCount++;
+                }
+            }
+
+            string preview =
+                $"Prepare {readyCount} polyline(s) across {includedGroups.Count} " +
+                $"group(s)?\n\n{dashedGroupCount} group(s) use dashed output; " +
+                $"{overlappingIds.Count} overlapping polyline(s) and " +
+                $"{exceptionCount - overlappingIds.Count} other exception(s) " +
+                "will be retained for review. Successfully prepared source " +
+                "polylines will be erased.";
+            if (Forms.MessageBox.Show(
+                    preview,
+                    "Confirm batch preparation",
+                    Forms.MessageBoxButtons.YesNo,
+                    Forms.MessageBoxIcon.Warning) != Forms.DialogResult.Yes)
+            {
+                return;
             }
 
             int prepared = 0;

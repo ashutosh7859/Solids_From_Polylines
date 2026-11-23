@@ -98,7 +98,8 @@ namespace SolidsFromPolylines
                 Location = new Drawing.Point(14, 12),
                 Size = new Drawing.Size(1088, 38),
                 Text = "Choose the groups to prepare and set continuous or dashed output. " +
-                    "Dash and gap use drawing units. Exceptions are skipped for review."
+                    "Dash/gap use drawing units. Selected-group overlaps are checked " +
+                    "before preparation."
             };
             var selectAllButton = new Forms.Button
             {
@@ -112,31 +113,37 @@ namespace SolidsFromPolylines
                 Size = new Drawing.Size(90, 28),
                 Text = "Clear all"
             };
+            var bulkLabel = new Forms.Label
+            {
+                AutoSize = true,
+                Location = new Drawing.Point(220, 61),
+                Text = "Set selected rows:"
+            };
             var bulkOutput = new Forms.ComboBox
             {
                 DropDownStyle = Forms.ComboBoxStyle.DropDownList,
-                Location = new Drawing.Point(220, 56),
+                Location = new Drawing.Point(322, 56),
                 Size = new Drawing.Size(105, 24)
             };
             bulkOutput.Items.AddRange(new object[] { "Continuous", "Dash" });
             bulkOutput.SelectedIndex = 0;
             var bulkDash = new Forms.TextBox
             {
-                Location = new Drawing.Point(390, 56),
+                Location = new Drawing.Point(440, 56),
                 Size = new Drawing.Size(68, 24),
                 PlaceholderText = "Dash"
             };
             var bulkGap = new Forms.TextBox
             {
-                Location = new Drawing.Point(466, 56),
+                Location = new Drawing.Point(516, 56),
                 Size = new Drawing.Size(68, 24),
                 PlaceholderText = "Gap"
             };
             var bulkApplyButton = new Forms.Button
             {
-                Location = new Drawing.Point(544, 54),
-                Size = new Drawing.Size(150, 28),
-                Text = "Apply to selected"
+                Location = new Drawing.Point(594, 54),
+                Size = new Drawing.Size(170, 28),
+                Text = "Apply output to rows"
             };
 
             groupsGrid = new Forms.DataGridView
@@ -213,14 +220,18 @@ namespace SolidsFromPolylines
 
             selectAllButton.Click += (_, _) =>
             {
+                groupsGrid.ClearSelection();
                 foreach (Forms.DataGridViewRow row in groupsGrid.Rows)
                 {
                     var group = row.Tag as BatchPreparationGroup;
-                    row.Cells[0].Value = group != null && group.EligibleIds.Count > 0;
+                    bool ready = group != null && group.EligibleIds.Count > 0;
+                    row.Cells[0].Value = ready;
+                    row.Selected = ready;
                 }
             };
             clearButton.Click += (_, _) =>
             {
+                groupsGrid.ClearSelection();
                 foreach (Forms.DataGridViewRow row in groupsGrid.Rows)
                 {
                     row.Cells[0].Value = false;
@@ -235,6 +246,7 @@ namespace SolidsFromPolylines
             Controls.Add(instructions);
             Controls.Add(selectAllButton);
             Controls.Add(clearButton);
+            Controls.Add(bulkLabel);
             Controls.Add(bulkOutput);
             Controls.Add(bulkDash);
             Controls.Add(bulkGap);
@@ -350,6 +362,27 @@ namespace SolidsFromPolylines
             string dashText,
             string gapText)
         {
+            groupsGrid.CommitEdit(Forms.DataGridViewDataErrorContexts.Commit);
+            groupsGrid.EndEdit();
+
+            List<Forms.DataGridViewRow> targetRows =
+                groupsGrid.SelectedRows.Count > 0
+                    ? groupsGrid.SelectedRows.Cast<Forms.DataGridViewRow>().ToList()
+                    : groupsGrid.Rows
+                        .Cast<Forms.DataGridViewRow>()
+                        .Where(row => Convert.ToBoolean(row.Cells[0].Value ?? false))
+                        .ToList();
+            if (targetRows.Count == 0)
+            {
+                Forms.MessageBox.Show(
+                    this,
+                    "Select rows with Ctrl or Shift, or check their Include boxes.",
+                    "No groups selected",
+                    Forms.MessageBoxButtons.OK,
+                    Forms.MessageBoxIcon.Information);
+                return;
+            }
+
             bool dashed = string.Equals(
                 output, "Dash", StringComparison.OrdinalIgnoreCase);
             double dashLength = 0;
@@ -368,19 +401,9 @@ namespace SolidsFromPolylines
                 return;
             }
 
-            if (groupsGrid.SelectedRows.Count == 0)
+            foreach (Forms.DataGridViewRow row in targetRows)
             {
-                Forms.MessageBox.Show(
-                    this,
-                    "Select one or more rows in the group list first.",
-                    "No groups selected",
-                    Forms.MessageBoxButtons.OK,
-                    Forms.MessageBoxIcon.Information);
-                return;
-            }
-
-            foreach (Forms.DataGridViewRow row in groupsGrid.SelectedRows)
-            {
+                row.Cells[0].Value = true;
                 row.Cells[7].Value = dashed ? "Dash" : "Continuous";
                 if (dashed)
                 {

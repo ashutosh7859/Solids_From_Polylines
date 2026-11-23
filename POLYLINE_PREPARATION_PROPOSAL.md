@@ -7,11 +7,15 @@ button. Users choose a selection or all lightweight polylines in the current
 space. The form summarizes groups by layer, source linetype, and width, with
 one row per group and counts instead of an entity list. Users can include
 groups, set continuous or dashed output, and apply common dash/gap values to
-multiple selected rows. Dash and gap values are in drawing units.
+multiple selected rows. Select Ready also highlights all eligible rows, while
+Clear All clears both inclusion and row selection. Dash and gap values are in
+drawing units.
 
 Positive constant widths and uniform per-segment widths are supported. Varying
 widths, invalid geometry, and overlapping lines are flagged and retained for
-review. Width normalization and automatic interpretation of source linetype
+review. Overlap detection runs only among included groups. A confirmation
+summary appears before conversion because successful source polylines are
+erased. Width normalization and automatic interpretation of source linetype
 patterns remain outside this first pass.
 
 ## Current behavior
