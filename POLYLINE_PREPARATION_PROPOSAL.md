@@ -9,7 +9,9 @@ one row per group and counts instead of an entity list. Users can include
 groups, set continuous or dashed output, and apply common dash/gap values to
 multiple selected rows. Select Ready also highlights all eligible rows, while
 Clear All clears both inclusion and row selection. Dash and gap values are in
-drawing units.
+drawing units. Toggling Include on any selected row applies that checkbox state
+to all selected rows. Continuous output clears and disables the row's dash/gap
+cells.
 
 Positive constant widths and uniform per-segment widths are supported. Varying
 widths, invalid geometry, and overlapping lines are flagged and retained for

@@ -80,6 +80,9 @@ namespace SolidsFromPolylines
     internal sealed class BatchPreparationDialog : Forms.Form
     {
         private readonly Forms.DataGridView groupsGrid;
+        private List<Forms.DataGridViewRow> includeRowsBeforeClick;
+        private bool includeValueAfterClick;
+        private bool syncingIncludeValues;
 
         public BatchPreparationDialog(List<BatchPreparationGroup> groups)
         {
@@ -189,6 +192,8 @@ namespace SolidsFromPolylines
                 groupsGrid.Rows[rowIndex].Cells[4].ReadOnly = true;
                 groupsGrid.Rows[rowIndex].Cells[5].ReadOnly = true;
                 groupsGrid.Rows[rowIndex].Cells[6].ReadOnly = true;
+                SetDashGapAvailability(
+                    groupsGrid.Rows[rowIndex], group.Dashed, clearWhenContinuous: true);
             }
 
             int total = groups.Sum(group => group.Count);
@@ -237,10 +242,16 @@ namespace SolidsFromPolylines
                     row.Cells[0].Value = false;
                 }
             };
+            groupsGrid.CellMouseDown += CaptureIncludeSelection;
+            groupsGrid.CurrentCellDirtyStateChanged += CommitCurrentCell;
+            groupsGrid.CellValueChanged += UpdateCellDependentState;
+            groupsGrid.KeyDown += ToggleIncludeForSelectedRows;
             bulkApplyButton.Click += (_, _) => ApplyBulkSettings(
                 bulkOutput.SelectedItem?.ToString(),
                 bulkDash.Text,
                 bulkGap.Text);
+            bulkOutput.SelectedIndexChanged += (_, _) =>
+                UpdateBulkDashGapAvailability(bulkOutput, bulkDash, bulkGap);
             applyButton.Click += (_, _) => ApplySettings();
 
             Controls.Add(instructions);
@@ -257,6 +268,138 @@ namespace SolidsFromPolylines
             Controls.Add(cancelButton);
             AcceptButton = applyButton;
             CancelButton = cancelButton;
+            UpdateBulkDashGapAvailability(bulkOutput, bulkDash, bulkGap);
+        }
+
+        private void CaptureIncludeSelection(
+            object sender,
+            Forms.DataGridViewCellMouseEventArgs e)
+        {
+            includeRowsBeforeClick = null;
+            if (e.RowIndex < 0 || e.ColumnIndex != 0)
+            {
+                return;
+            }
+
+            Forms.DataGridViewRow clickedRow = groupsGrid.Rows[e.RowIndex];
+            if (!clickedRow.Selected || groupsGrid.SelectedRows.Count < 2)
+            {
+                return;
+            }
+
+            includeRowsBeforeClick = groupsGrid.SelectedRows
+                .Cast<Forms.DataGridViewRow>()
+                .ToList();
+            includeValueAfterClick = !Convert.ToBoolean(
+                clickedRow.Cells[0].Value ?? false, CultureInfo.InvariantCulture);
+        }
+
+        private void ToggleIncludeForSelectedRows(object sender, Forms.KeyEventArgs e)
+        {
+            if (e.KeyCode != Forms.Keys.Space ||
+                groupsGrid.CurrentCell == null ||
+                groupsGrid.CurrentCell.ColumnIndex != 0 ||
+                groupsGrid.SelectedRows.Count < 2)
+            {
+                return;
+            }
+
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            bool include = !Convert.ToBoolean(
+                groupsGrid.CurrentCell.Value ?? false,
+                CultureInfo.InvariantCulture);
+            foreach (Forms.DataGridViewRow row in groupsGrid.SelectedRows)
+            {
+                row.Cells[0].Value = include;
+            }
+        }
+
+        private void CommitCurrentCell(object sender, EventArgs e)
+        {
+            if (!groupsGrid.IsCurrentCellDirty || groupsGrid.CurrentCell == null)
+            {
+                return;
+            }
+
+            int columnIndex = groupsGrid.CurrentCell.ColumnIndex;
+            if (columnIndex == 0 || columnIndex == 7)
+            {
+                groupsGrid.CommitEdit(Forms.DataGridViewDataErrorContexts.Commit);
+            }
+
+            if (columnIndex != 0 || includeRowsBeforeClick == null ||
+                syncingIncludeValues)
+            {
+                return;
+            }
+
+            syncingIncludeValues = true;
+            foreach (Forms.DataGridViewRow row in includeRowsBeforeClick)
+            {
+                row.Cells[0].Value = includeValueAfterClick;
+                row.Selected = true;
+            }
+
+            syncingIncludeValues = false;
+            includeRowsBeforeClick = null;
+        }
+
+        private void UpdateCellDependentState(
+            object sender,
+            Forms.DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex < 0 || e.ColumnIndex != 7)
+            {
+                return;
+            }
+
+            Forms.DataGridViewRow row = groupsGrid.Rows[e.RowIndex];
+            bool dashed = string.Equals(
+                row.Cells[7].Value?.ToString(),
+                "Dash",
+                StringComparison.OrdinalIgnoreCase);
+            SetDashGapAvailability(row, dashed, clearWhenContinuous: true);
+        }
+
+        private void SetDashGapAvailability(
+            Forms.DataGridViewRow row,
+            bool dashed,
+            bool clearWhenContinuous)
+        {
+            foreach (int columnIndex in new[] { 8, 9 })
+            {
+                Forms.DataGridViewCell cell = row.Cells[columnIndex];
+                cell.ReadOnly = !dashed;
+                cell.Style.BackColor = dashed
+                    ? groupsGrid.DefaultCellStyle.BackColor
+                    : Drawing.SystemColors.Control;
+                cell.Style.ForeColor = dashed
+                    ? groupsGrid.DefaultCellStyle.ForeColor
+                    : Drawing.SystemColors.GrayText;
+                if (!dashed && clearWhenContinuous)
+                {
+                    cell.Value = string.Empty;
+                }
+            }
+        }
+
+        private static void UpdateBulkDashGapAvailability(
+            Forms.ComboBox output,
+            Forms.TextBox dash,
+            Forms.TextBox gap)
+        {
+            bool enabled = string.Equals(
+                output.SelectedItem?.ToString(),
+                "Dash",
+                StringComparison.OrdinalIgnoreCase);
+            dash.Enabled = enabled;
+            gap.Enabled = enabled;
+            if (!enabled)
+            {
+                dash.Clear();
+                gap.Clear();
+            }
         }
 
         private void AddColumns()
@@ -318,7 +461,15 @@ namespace SolidsFromPolylines
                     row.Cells[7].Value?.ToString(),
                     "Dash",
                     StringComparison.OrdinalIgnoreCase);
-                if (!group.Included || group.EligibleIds.Count == 0 || !group.Dashed)
+                if (!group.Dashed)
+                {
+                    group.DashLength = 0;
+                    group.GapLength = 0;
+                    SetDashGapAvailability(row, dashed: false, clearWhenContinuous: true);
+                    continue;
+                }
+
+                if (!group.Included || group.EligibleIds.Count == 0)
                 {
                     continue;
                 }
@@ -412,6 +563,9 @@ namespace SolidsFromPolylines
                     row.Cells[9].Value = gapLength.ToString(
                         "G", CultureInfo.InvariantCulture);
                 }
+
+                SetDashGapAvailability(
+                    row, dashed, clearWhenContinuous: true);
             }
         }
 
