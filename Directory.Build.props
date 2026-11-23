@@ -1,0 +1,5 @@
+<Project>
+  <PropertyGroup>
+    <C3DAssembliesPath Condition="'$(C3DAssembliesPath)' == ''">$(MSBuildThisFileDirectory)../../.devcontainer/C3D ASSEMBLIES</C3DAssembliesPath>
+  </PropertyGroup>
+</Project>

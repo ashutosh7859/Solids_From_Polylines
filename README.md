@@ -14,7 +14,8 @@ to an arbitrary add-in folder. For automatic loading, install the generated
 `.bundle` folder under `ApplicationPlugins`. For a one-time manual load, use
 `NETLOAD` to select the DLL; the Solids tab is created when the ribbon is ready.
 Commands remain available by name at the Civil 3D command line:
-`MARKING_PREP`, `MARKING_SOLIDS`, `MARKING_BLOCK`, and `MARKING_BLOCK_LAYER`.
+`MARKING_PREP`, `MARKING_CURVES`, `MARKING_SOLIDS`, `MARKING_BLOCK`, and
+`MARKING_BLOCK_LAYER`.
 
 ## Commands
 
@@ -27,12 +28,23 @@ Commands remain available by name at the Civil 3D command line:
   segments are retained and colored magenta for review. Other source polylines
   are erased only when boundary creation succeeds; failed inputs are retained
   and colored yellow.
+- `MARKING_CURVES` converts selected standalone circles and full ellipses into
+  closed lightweight polylines. Circles use exact arc segments; ellipses use
+  adaptive chord sampling at the requested maximum deviation. Only horizontal
+  circles and full ellipses are supported. Choose whether to keep or delete
+  each source curve; unsupported curves are retained and reported.
 - `MARKING_SOLIDS` opens a Windows Forms surface picker, selecting the first
   surface by default. It samples the chosen surface along each selected
   boundary group at its centroid, then directly extrudes the planar region by
-  the signed thickness. Nested boundaries are cut from the region before
-  extrusion. Boundaries are erased only after solid creation succeeds;
-  failed boundaries are retained and colored yellow.
+  the signed thickness. When nested boundaries are detected, choose whether to
+  create the existing annular solid (the Enter/default choice), create that
+  solid plus a separately thickened inner solid, or skip nested groups while
+  processing unrelated boundaries. Open or non-horizontal polylines are
+  skipped and retained while other valid boundaries continue. If an open
+  polyline's extents contain or are contained by a selected closed boundary at
+  the same elevation, both are skipped as a possibly incomplete annular pair.
+  Boundaries are erased only after solid creation succeeds; failed or skipped
+  boundaries are retained and colored yellow.
 - `MARKING_BLOCK` prompts for one 3D solid, then collects all 3D solids
   directly in Model Space on that solid's layer. It replaces them in place
   with one block reference using the origin as the block base point; no base

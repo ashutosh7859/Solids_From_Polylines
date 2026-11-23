@@ -25,6 +25,7 @@ namespace SolidsFromPolylines
                 .DocumentManager.MdiActiveDocument;
             document?.Editor.WriteMessage(
                 "\nSolidsFromPolylines loaded. Commands: MARKING_PREP, " +
+                "MARKING_CURVES, " +
                 "MARKING_SOLIDS, MARKING_BLOCK, MARKING_BLOCK_LAYER.");
             SolidsRibbon.Initialize();
         }
@@ -163,6 +164,149 @@ namespace SolidsFromPolylines
                 $"{overlappingIds.Count} skipped for overlap review.");
         }
 
+        [CommandMethod("MARKING_CURVES")]
+        public void ConvertCirclesAndEllipses()
+        {
+            var document = Autodesk.AutoCAD.ApplicationServices.Application
+                .DocumentManager.MdiActiveDocument;
+            if (document == null)
+            {
+                return;
+            }
+
+            Editor editor = document.Editor;
+            PromptSelectionResult selection = editor.GetSelection(
+                new PromptSelectionOptions
+                {
+                    MessageForAdding = "\nSelect standalone circles and full ellipses: "
+                },
+                new SelectionFilter(new[]
+                {
+                    new TypedValue((int)DxfCode.Start, "CIRCLE,ELLIPSE")
+                }));
+            if (selection.Status != PromptStatus.OK)
+            {
+                return;
+            }
+
+            var selectedIds = new List<ObjectId>();
+            int ellipseCount = 0;
+            foreach (SelectedObject selected in selection.Value)
+            {
+                if (selected == null || selected.ObjectId.IsNull)
+                {
+                    continue;
+                }
+
+                selectedIds.Add(selected.ObjectId);
+                using (Transaction transaction = document.Database
+                           .TransactionManager.StartOpenCloseTransaction())
+                {
+                    if (transaction.GetObject(selected.ObjectId, OpenMode.ForRead)
+                        is Ellipse)
+                    {
+                        ellipseCount++;
+                    }
+                }
+            }
+
+            if (selectedIds.Count == 0)
+            {
+                editor.WriteMessage("\nNo circles or ellipses were selected.");
+                return;
+            }
+
+            double tolerance = 0.01;
+            if (ellipseCount > 0)
+            {
+                PromptDoubleResult toleranceResult = editor.GetDouble(
+                    new PromptDoubleOptions(
+                        "\nMaximum ellipse chord deviation <0.01>: ")
+                    {
+                        AllowNegative = false,
+                        AllowZero = false,
+                        DefaultValue = 0.01,
+                        UseDefaultValue = true
+                    });
+                if (toleranceResult.Status != PromptStatus.OK ||
+                    !IsFinite(toleranceResult.Value) ||
+                    toleranceResult.Value <= GeometryTolerance)
+                {
+                    return;
+                }
+
+                tolerance = toleranceResult.Value;
+            }
+
+            PromptKeywordOptions keepOptions = new PromptKeywordOptions(
+                "\nOriginal curves [Keep/Delete] <Keep>: ")
+            {
+                AllowNone = true
+            };
+            keepOptions.Keywords.Add("Keep");
+            keepOptions.Keywords.Add("Delete");
+            PromptResult keepResult = editor.GetKeywords(keepOptions);
+            if (keepResult.Status != PromptStatus.OK &&
+                keepResult.Status != PromptStatus.None)
+            {
+                return;
+            }
+
+            bool deleteOriginals = string.Equals(
+                keepResult.StringResult, "Delete", StringComparison.OrdinalIgnoreCase);
+            int converted = 0;
+            int skipped = 0;
+            foreach (ObjectId id in selectedIds)
+            {
+                try
+                {
+                    using (Transaction transaction = document.Database
+                               .TransactionManager.StartTransaction())
+                    {
+                        Entity source = transaction.GetObject(id, OpenMode.ForRead)
+                            as Entity;
+                        Polyline convertedPolyline = source switch
+                        {
+                            Circle circle => CircleToPolyline(circle),
+                            Ellipse ellipse => EllipseToPolyline(ellipse, tolerance),
+                            _ => null
+                        };
+
+                        if (convertedPolyline == null)
+                        {
+                            skipped++;
+                            continue;
+                        }
+
+                        BlockTableRecord owner = (BlockTableRecord)transaction
+                            .GetObject(source.OwnerId, OpenMode.ForWrite);
+                        owner.AppendEntity(convertedPolyline);
+                        transaction.AddNewlyCreatedDBObject(convertedPolyline, true);
+                        if (deleteOriginals)
+                        {
+                            source.UpgradeOpen();
+                            source.Erase();
+                        }
+
+                        transaction.Commit();
+                        converted++;
+                    }
+                }
+                catch (System.Exception exception)
+                {
+                    skipped++;
+                    editor.WriteMessage(
+                        $"\nCurve {id.Handle} was retained and skipped: " +
+                        exception.Message);
+                }
+            }
+
+            editor.WriteMessage(
+                $"\nConverted {converted} circle/ellipse curve(s); " +
+                $"{skipped} skipped. Originals were " +
+                (deleteOriginals ? "deleted after successful conversion." : "kept."));
+        }
+
         [CommandMethod("MARKING_SOLIDS")]
         public void CreateMarkingSolids()
         {
@@ -200,7 +344,7 @@ namespace SolidsFromPolylines
                 new PromptSelectionOptions
                 {
                     MessageForAdding =
-                        "\nSelect closed marking boundaries for surface-based solids: "
+                        "\nSelect marking boundary polylines (open ones will be skipped): "
                 },
                 new SelectionFilter(new[]
                 {
@@ -224,6 +368,69 @@ namespace SolidsFromPolylines
             {
                 editor.WriteMessage("\nNo valid polylines were selected.");
                 return;
+            }
+
+            BoundarySelectionResult boundarySelection =
+                GetProcessableBoundarySelection(document.Database, selectedIds);
+            foreach (BoundaryFailure failure in boundarySelection.Failures)
+            {
+                MarkPolylineAsFailed(
+                    document.Database, failure.BoundaryId, editor);
+                editor.WriteMessage(
+                    $"\nBoundary {failure.BoundaryId.Handle} was skipped and " +
+                    $"retained: {failure.Message}");
+            }
+
+            selectedIds = boundarySelection.ProcessableIds;
+            if (selectedIds.Count == 0)
+            {
+                editor.WriteMessage(
+                    "\nNo eligible closed horizontal boundaries remain to process.");
+                return;
+            }
+
+            string nestedMode = "Annular";
+            double innerHeight = 0;
+            if (HasNestedBoundaryGroups(document.Database, selectedIds))
+            {
+                var nestedOptions = new PromptKeywordOptions(
+                    "\nNested boundaries [Annular/AnnularInner/Skip] <Annular>: ")
+                {
+                    AllowNone = true
+                };
+                nestedOptions.Keywords.Add("Annular");
+                nestedOptions.Keywords.Add("AnnularInner");
+                nestedOptions.Keywords.Add("Skip");
+                PromptResult nestedResult = editor.GetKeywords(nestedOptions);
+                if (nestedResult.Status != PromptStatus.OK &&
+                    nestedResult.Status != PromptStatus.None)
+                {
+                    return;
+                }
+
+                if (nestedResult.Status == PromptStatus.OK)
+                {
+                    nestedMode = nestedResult.StringResult;
+                }
+
+                if (nestedMode == "AnnularInner")
+                {
+                    PromptDoubleResult innerHeightResult = editor.GetDouble(
+                        new PromptDoubleOptions(
+                            "\nEnter signed thickness for inner solid: ")
+                        {
+                            AllowZero = false,
+                            AllowNegative = true
+                        });
+                    if (innerHeightResult.Status != PromptStatus.OK ||
+                        !IsFinite(innerHeightResult.Value) ||
+                        Math.Abs(innerHeightResult.Value) <= GeometryTolerance)
+                    {
+                        return;
+                    }
+
+                    innerHeight = innerHeightResult.Value;
+                }
             }
 
             // Complete all interactive Editor prompts before showing the modal
@@ -255,7 +462,9 @@ namespace SolidsFromPolylines
                     document.Database,
                     selectedIds,
                     surfaceId,
-                    heightResult.Value);
+                    heightResult.Value,
+                    nestedMode,
+                    innerHeight);
                 foreach (BoundaryFailure failure in creationResult.Failures)
                 {
                     MarkPolylineAsFailed(
@@ -267,7 +476,8 @@ namespace SolidsFromPolylines
 
                 editor.WriteMessage(
                     $"\nCreated {creationResult.SolidsCreated} solid(s); " +
-                    $"{creationResult.Failures.Count} boundary group(s) failed. " +
+                    $"{boundarySelection.Failures.Count + creationResult.Failures.Count} " +
+                    "boundary/boundary group(s) were skipped or failed. " +
                     $"Surface: {surfaceName}. " +
                     "Boundaries were erased only for successful solid groups.");
             }
@@ -1186,11 +1396,115 @@ namespace SolidsFromPolylines
             return segmentCount - 1;
         }
 
+        private static BoundarySelectionResult GetProcessableBoundarySelection(
+            Database database,
+            List<ObjectId> selectedIds)
+        {
+            using (Transaction transaction =
+                   database.TransactionManager.StartTransaction())
+            {
+                var processableIds = new List<ObjectId>();
+                var failures = new List<BoundaryFailure>();
+                var closedCandidates = new List<BoundaryCandidate>();
+                var openCandidates = new List<BoundaryCandidate>();
+
+                foreach (ObjectId id in selectedIds)
+                {
+                    if (transaction.GetObject(id, OpenMode.ForRead) is not Polyline polyline)
+                    {
+                        failures.Add(new BoundaryFailure(
+                            id, "The selected object is not a lightweight polyline."));
+                        continue;
+                    }
+
+                    if (polyline.Closed &&
+                        polyline.Normal.IsEqualTo(Vector3d.ZAxis))
+                    {
+                        processableIds.Add(id);
+                        try
+                        {
+                            closedCandidates.Add(new BoundaryCandidate(
+                                id, polyline, polyline.GeometricExtents));
+                        }
+                        catch
+                        {
+                            // The solid creation pass reports invalid closed geometry.
+                        }
+
+                        continue;
+                    }
+
+                    if (!polyline.Closed &&
+                        polyline.Normal.IsEqualTo(Vector3d.ZAxis))
+                    {
+                        try
+                        {
+                            openCandidates.Add(new BoundaryCandidate(
+                                id, polyline, polyline.GeometricExtents));
+                        }
+                        catch (System.Exception exception)
+                        {
+                            failures.Add(new BoundaryFailure(
+                                id, $"The open polyline could not be checked: " +
+                                    exception.Message));
+                        }
+
+                        continue;
+                    }
+
+                    failures.Add(new BoundaryFailure(
+                        id, "The boundary must be horizontal and closed."));
+                }
+
+                var pairedOpenIds = new HashSet<ObjectId>();
+                var pairedClosedIds = new HashSet<ObjectId>();
+                foreach (BoundaryCandidate open in openCandidates)
+                {
+                    foreach (BoundaryCandidate closed in closedCandidates)
+                    {
+                        if (Math.Abs(open.Polyline.Elevation -
+                                closed.Polyline.Elevation) > GeometryTolerance ||
+                            (!ExtentsContain(open.Extents, closed.Extents) &&
+                             !ExtentsContain(closed.Extents, open.Extents)))
+                        {
+                            continue;
+                        }
+
+                        pairedOpenIds.Add(open.ObjectId);
+                        pairedClosedIds.Add(closed.ObjectId);
+                        failures.Add(new BoundaryFailure(
+                            open.ObjectId,
+                            $"Its extents match closed boundary {closed.ObjectId.Handle}; " +
+                            "both were skipped because the annular pair may be incomplete."));
+                        failures.Add(new BoundaryFailure(
+                            closed.ObjectId,
+                            $"It may be paired with open boundary {open.ObjectId.Handle}; " +
+                            "both were skipped because the annular pair may be incomplete."));
+                    }
+                }
+
+                foreach (BoundaryCandidate open in openCandidates)
+                {
+                    if (!pairedOpenIds.Contains(open.ObjectId))
+                    {
+                        failures.Add(new BoundaryFailure(
+                            open.ObjectId,
+                            "An open polyline cannot bound a solid and was skipped."));
+                    }
+                }
+
+                processableIds.RemoveAll(id => pairedClosedIds.Contains(id));
+                return new BoundarySelectionResult(processableIds, failures);
+            }
+        }
+
         private static SolidCreationResult CreateSolidsForBoundaries(
             Database database,
             List<ObjectId> boundaryIds,
             ObjectId surfaceId,
-            double height)
+            double height,
+            string nestedMode,
+            double innerHeight)
         {
             using (Transaction transaction =
                    database.TransactionManager.StartTransaction())
@@ -1279,8 +1593,37 @@ namespace SolidsFromPolylines
                         database.CurrentSpaceId, OpenMode.ForWrite);
                     int solidsCreated = 0;
                     var erasedBoundaryIds = new HashSet<ObjectId>();
+                    var nestedGroupRoots = new HashSet<int>();
+                    if (nestedMode == "Skip")
+                    {
+                        foreach (BoundaryRegion boundary in boundaryRegions)
+                        {
+                            if (boundary.ParentIndex >= 0)
+                            {
+                                int rootIndex = boundary.Index;
+                                while (boundaryRegions[rootIndex].ParentIndex >= 0)
+                                {
+                                    rootIndex = boundaryRegions[rootIndex].ParentIndex;
+                                }
+
+                                nestedGroupRoots.Add(rootIndex);
+                            }
+                        }
+                    }
+
                     foreach (BoundaryRegion boundaryRegion in boundaryRegions)
                     {
+                        int rootIndex = boundaryRegion.Index;
+                        while (boundaryRegions[rootIndex].ParentIndex >= 0)
+                        {
+                            rootIndex = boundaryRegions[rootIndex].ParentIndex;
+                        }
+
+                        if (nestedGroupRoots.Contains(rootIndex))
+                        {
+                            continue;
+                        }
+
                         if (boundaryRegion.Depth % 2 != 0)
                         {
                             continue;
@@ -1307,9 +1650,47 @@ namespace SolidsFromPolylines
                                 solidsCreated++;
                                 erasedBoundaryIds.Add(
                                     boundaryRegion.Boundary.ObjectId);
-                                foreach (BoundaryRegion hole in holes)
+                                if (nestedMode != "AnnularInner")
                                 {
-                                    erasedBoundaryIds.Add(hole.Boundary.ObjectId);
+                                    foreach (BoundaryRegion hole in holes)
+                                    {
+                                        erasedBoundaryIds.Add(hole.Boundary.ObjectId);
+                                    }
+                                }
+                                else
+                                {
+                                    foreach (BoundaryRegion hole in holes)
+                                    {
+                                        Solid3d innerSolid = null;
+                                        try
+                                        {
+                                            innerSolid = CreateBoundaryExtrusion(
+                                                hole,
+                                                new List<BoundaryRegion>(),
+                                                surface,
+                                                innerHeight,
+                                                coordinateOffset);
+                                            using (innerSolid)
+                                            {
+                                                innerSolid.SetDatabaseDefaults(database);
+                                                innerSolid.Layer = hole.Boundary.Layer;
+                                                owner.AppendEntity(innerSolid);
+                                                transaction.AddNewlyCreatedDBObject(
+                                                    innerSolid, true);
+                                                solidsCreated++;
+                                                erasedBoundaryIds.Add(
+                                                    hole.Boundary.ObjectId);
+                                            }
+                                        }
+                                        catch (System.Exception innerException)
+                                        {
+                                            innerSolid?.Dispose();
+                                            failures.Add(new BoundaryFailure(
+                                                hole.Boundary.ObjectId,
+                                                $"The annular solid was created, but " +
+                                                $"the inner solid failed: {innerException.Message}"));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1353,6 +1734,197 @@ namespace SolidsFromPolylines
                     }
                 }
             }
+        }
+
+        private static bool HasNestedBoundaryGroups(
+            Database database,
+            List<ObjectId> boundaryIds)
+        {
+            using (Transaction transaction =
+                   database.TransactionManager.StartTransaction())
+            {
+                var boundaries = new List<Polyline>();
+                foreach (ObjectId id in boundaryIds)
+                {
+                    if (transaction.GetObject(id, OpenMode.ForRead) is Polyline boundary &&
+                        boundary.Closed &&
+                        boundary.Normal.IsEqualTo(Vector3d.ZAxis))
+                    {
+                        boundaries.Add(boundary);
+                    }
+                }
+
+                Vector3d coordinateOffset = GetBoundaryCoordinateOffset(boundaries);
+                var regions = new List<BoundaryRegion>();
+                try
+                {
+                    foreach (Polyline boundary in boundaries)
+                    {
+                        Region unownedRegion = null;
+                        try
+                        {
+                            using (var localBoundary = (Polyline)boundary.Clone())
+                            {
+                                localBoundary.TransformBy(
+                                    Matrix3d.Displacement(-coordinateOffset));
+                                var curves = new DBObjectCollection { localBoundary };
+                                DBObjectCollection created = Region.CreateFromCurves(curves);
+                                if (created.Count != 1 || created[0] is not Region region)
+                                {
+                                    DisposeAll(created);
+                                    continue;
+                                }
+
+                                unownedRegion = region;
+                                regions.Add(new BoundaryRegion(
+                                    boundary,
+                                    region,
+                                    GetRegionArea(region,
+                                        boundary.Elevation - coordinateOffset.Z),
+                                    TranslateExtents(boundary.GeometricExtents,
+                                        -coordinateOffset),
+                                    boundary.Elevation - coordinateOffset.Z));
+                                unownedRegion = null;
+                            }
+                        }
+                        catch
+                        {
+                            unownedRegion?.Dispose();
+                            // Invalid boundaries are reported by the solid creation pass.
+                        }
+                    }
+
+                    AssignContainingRegions(regions);
+                    return regions.Exists(region => region.ParentIndex >= 0);
+                }
+                finally
+                {
+                    foreach (BoundaryRegion region in regions)
+                    {
+                        region.Region.Dispose();
+                    }
+                }
+            }
+        }
+
+        private static Polyline CircleToPolyline(Circle circle)
+        {
+            if (Math.Abs(Math.Abs(circle.Normal.DotProduct(Vector3d.ZAxis)) - 1.0) >
+                GeometryTolerance)
+            {
+                throw new InvalidOperationException(
+                    "Only circles in a horizontal WCS plane can be converted.");
+            }
+
+            var polyline = new Polyline();
+            polyline.SetPropertiesFrom(circle);
+            polyline.Normal = Vector3d.ZAxis;
+            polyline.Elevation = circle.Center.Z;
+            double radius = circle.Radius;
+            polyline.AddVertexAt(0,
+                new Point2d(circle.Center.X + radius, circle.Center.Y), 1, 0, 0);
+            polyline.AddVertexAt(1,
+                new Point2d(circle.Center.X - radius, circle.Center.Y), 1, 0, 0);
+            polyline.Closed = true;
+            return polyline;
+        }
+
+        private static Polyline EllipseToPolyline(Ellipse ellipse, double tolerance)
+        {
+            double start = ellipse.StartParam;
+            double end = ellipse.EndParam;
+            double span = end - start;
+            if (Math.Abs(Math.Abs(ellipse.Normal.DotProduct(Vector3d.ZAxis)) - 1.0) >
+                    GeometryTolerance ||
+                Math.Abs(span - (2.0 * Math.PI)) > 1e-6)
+            {
+                throw new InvalidOperationException(
+                    "Only full ellipses in a horizontal WCS plane can be converted.");
+            }
+
+            var points = new List<Point3d>();
+            Point3d first = ellipse.GetPointAtParameter(start);
+            points.Add(first);
+            const int initialSegments = 16;
+            for (int index = 0; index < initialSegments; index++)
+            {
+                double t1 = start + span * index / initialSegments;
+                double t2 = start + span * (index + 1) / initialSegments;
+                Point3d p1 = ellipse.GetPointAtParameter(t1);
+                Point3d p2 = ellipse.GetPointAtParameter(t2);
+                AppendEllipseSegment(
+                    ellipse, t1, t2, p1, p2, tolerance, 12, points);
+            }
+
+            // The last sampled endpoint duplicates the first vertex of a closed loop.
+            if (points.Count > 1 && points[points.Count - 1].DistanceTo(first) <=
+                GeometryTolerance)
+            {
+                points.RemoveAt(points.Count - 1);
+            }
+
+            if (points.Count < 4 || points.Exists(point =>
+                    Math.Abs(point.Z - first.Z) > GeometryTolerance))
+            {
+                throw new InvalidOperationException(
+                    "The ellipse did not produce a valid planar outline.");
+            }
+
+            var polyline = new Polyline();
+            polyline.SetPropertiesFrom(ellipse);
+            polyline.Normal = Vector3d.ZAxis;
+            polyline.Elevation = first.Z;
+            for (int index = 0; index < points.Count; index++)
+            {
+                polyline.AddVertexAt(index,
+                    new Point2d(points[index].X, points[index].Y), 0, 0, 0);
+            }
+
+            polyline.Closed = true;
+            return polyline;
+        }
+
+        private static void AppendEllipseSegment(
+            Ellipse ellipse,
+            double t1,
+            double t2,
+            Point3d p1,
+            Point3d p2,
+            double tolerance,
+            int depth,
+            List<Point3d> points)
+        {
+            double middleParameter = (t1 + t2) / 2.0;
+            Point3d middle = ellipse.GetPointAtParameter(middleParameter);
+            if (depth > 0 && DistanceFromPointToSegment(middle, p1, p2) > tolerance)
+            {
+                AppendEllipseSegment(
+                    ellipse, t1, middleParameter, p1, middle,
+                    tolerance, depth - 1, points);
+                AppendEllipseSegment(
+                    ellipse, middleParameter, t2, middle, p2,
+                    tolerance, depth - 1, points);
+                return;
+            }
+
+            points.Add(p2);
+        }
+
+        private static double DistanceFromPointToSegment(
+            Point3d point,
+            Point3d start,
+            Point3d end)
+        {
+            Vector3d segment = end - start;
+            double lengthSquared = segment.DotProduct(segment);
+            if (lengthSquared <= GeometryTolerance * GeometryTolerance)
+            {
+                return point.DistanceTo(start);
+            }
+
+            double parameter = Math.Max(0.0, Math.Min(1.0,
+                (point - start).DotProduct(segment) / lengthSquared));
+            return point.DistanceTo(start + (segment * parameter));
         }
 
         private static Solid3d CreateBoundaryExtrusion(
@@ -1936,6 +2508,37 @@ namespace SolidsFromPolylines
 
             public ObjectId BoundaryId { get; }
             public string Message { get; }
+        }
+
+        private sealed class BoundarySelectionResult
+        {
+            public BoundarySelectionResult(
+                List<ObjectId> processableIds,
+                List<BoundaryFailure> failures)
+            {
+                ProcessableIds = processableIds;
+                Failures = failures;
+            }
+
+            public List<ObjectId> ProcessableIds { get; }
+            public List<BoundaryFailure> Failures { get; }
+        }
+
+        private sealed class BoundaryCandidate
+        {
+            public BoundaryCandidate(
+                ObjectId objectId,
+                Polyline polyline,
+                Extents3d extents)
+            {
+                ObjectId = objectId;
+                Polyline = polyline;
+                Extents = extents;
+            }
+
+            public ObjectId ObjectId { get; }
+            public Polyline Polyline { get; }
+            public Extents3d Extents { get; }
         }
 
         private sealed class PolylineOverlapCandidate

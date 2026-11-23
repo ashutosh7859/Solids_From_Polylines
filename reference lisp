@@ -1,0 +1,167 @@
+;;; ------------------------------------------------------------------
+;;;  EL2PL  -  Convert ELLIPSE entities to LWPOLYLINE
+;;;  - Adaptive chord subdivision: max deviation from true ellipse <= tolerance
+;;;  - Full ellipses -> closed polyline; elliptical arcs -> open polyline
+;;;  - Mode: Selection (picked ellipses) or Layer (all ellipses on the
+;;;    layer of a picked object, in all spaces/layouts)
+;;;  - Preserves layer, linetype, colour, lineweight, ltscale, transparency,
+;;;    space/layout, plane (normal) and elevation
+;;;  - Option to keep or delete the original ellipses
+;;; ------------------------------------------------------------------
+(vl-load-com)
+
+;; point on curve at parameter (handles params wrapped past 2pi)
+(defun el2pl:pt (e p)
+  (cond ((vlax-curve-getPointAtParam e p))
+        ((vlax-curve-getPointAtParam e (- p (* 2.0 pi))))
+  )
+)
+
+;; 3D distance from point p to segment a-b
+(defun el2pl:dist2seg (p a b / ab ap len2 k)
+  (setq ab   (mapcar '- b a)
+        ap   (mapcar '- p a)
+        len2 (apply '+ (mapcar '* ab ab)))
+  (if (< len2 1e-16)
+    (distance p a)
+    (progn
+      (setq k (/ (apply '+ (mapcar '* ap ab)) len2)
+            k (max 0.0 (min 1.0 k)))
+      (distance p (mapcar '+ a (mapcar '(lambda (x) (* x k)) ab)))
+    )
+  )
+)
+
+;; recursive subdivision; returns points after p1 up to and including p2
+(defun el2pl:sample (e t1 t2 p1 p2 tol depth / tm pm)
+  (setq tm (/ (+ t1 t2) 2.0)
+        pm (el2pl:pt e tm))
+  (if (and (> depth 0) pm (> (el2pl:dist2seg pm p1 p2) tol))
+    (append (el2pl:sample e t1 tm p1 pm tol (1- depth))
+            (el2pl:sample e tm t2 pm p2 tol (1- depth)))
+    (list p2)
+  )
+)
+
+;; escape wildcard characters in a layer name for ssget filters
+(defun el2pl:esc (s / r)
+  (setq r "")
+  (foreach c (vl-string->list s)
+    (setq r (strcat r (if (member c '(35 64 46 42 63 126 91 93 45 44 96)) "`" "") (chr c)))
+  )
+  r
+)
+
+;; convert one ellipse; returns vertex count or nil
+(defun el2pl:convert (e tol / ed nrm closed sp ep span n0 dt k t1 t2 p1 p2 pts elev props)
+  (setq ed     (entget e)
+        nrm    (cond ((cdr (assoc 210 ed))) ('(0.0 0.0 1.0)))
+        closed (vlax-curve-isClosed e)
+        sp     (vlax-curve-getStartParam e)
+        ep     (vlax-curve-getEndParam e))
+  (if (< ep sp) (setq ep (+ ep (* 2.0 pi))))
+  (setq span (- ep sp)
+        n0   (max 4 (fix (+ 0.999999 (* 16.0 (/ span (* 2.0 pi))))))
+        dt   (/ span n0)
+        p1   (el2pl:pt e sp)
+        pts  (list p1)
+        k    0)
+  (repeat n0
+    (setq t1  (+ sp (* k dt))
+          t2  (if (= (1+ k) n0) ep (+ sp (* (1+ k) dt)))
+          p2  (el2pl:pt e t2)
+          pts (append (reverse (el2pl:sample e t1 t2 p1 p2 tol 12)) pts)
+          p1  p2
+          k   (1+ k))
+  )
+  (if closed (setq pts (cdr pts)))          ; drop duplicate end point
+  (setq pts   (reverse pts)
+        elev  (caddr (trans (cdr (assoc 10 ed)) 0 nrm))
+        props (vl-remove-if-not
+                '(lambda (x) (member (car x) '(67 410 8 6 62 48 370 420 430 440)))
+                ed))
+  (if (entmakex
+        (append
+          '((0 . "LWPOLYLINE") (100 . "AcDbEntity"))
+          props
+          (list '(100 . "AcDbPolyline")
+                (cons 90 (length pts))
+                (cons 70 (if closed 1 0))
+                (cons 38 elev))
+          (mapcar '(lambda (p / o) (setq o (trans p 0 nrm)) (list 10 (car o) (cadr o))) pts)
+          (list (cons 210 nrm))
+        )
+      )
+    (length pts)
+  )
+)
+
+(defun c:EL2PL (/ *error* doc tol mode keep sel ent lay ss i e n cnt vtx lck)
+  (defun *error* (msg)
+    (if doc (vla-EndUndoMark doc))
+    (if (not (wcmatch (strcase msg t) "*break*,*cancel*,*exit*"))
+      (princ (strcat "\nError: " msg)))
+    (princ)
+  )
+  (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
+  (or *el2pl-tol*  (setq *el2pl-tol* 0.01))
+  (or *el2pl-keep* (setq *el2pl-keep* "Delete"))
+
+  ;; tolerance
+  (initget 6)
+  (setq tol (getdist (strcat "\nMax chord deviation (tolerance) <" (rtos *el2pl-tol* 2 6) ">: ")))
+  (if tol (setq *el2pl-tol* tol) (setq tol *el2pl-tol*))
+
+  ;; keep / delete originals
+  (initget "Keep Delete")
+  (setq keep (getkword (strcat "\nOriginal ellipses [Keep/Delete] <" *el2pl-keep* ">: ")))
+  (if keep (setq *el2pl-keep* keep) (setq keep *el2pl-keep*))
+
+  ;; mode
+  (initget "Selection Layer")
+  (setq mode (cond ((getkword "\nMode [Selection/Layer] <Selection>: ")) ("Selection")))
+
+  (if (= mode "Layer")
+    (if (setq sel (entsel "\nPick any object on the target layer: "))
+      (progn
+        (setq lay (cdr (assoc 8 (entget (car sel)))))
+        (setq ss (ssget "_X" (list '(0 . "ELLIPSE") (cons 8 (el2pl:esc lay)))))
+        (princ (strcat "\nLayer \"" lay "\": "
+                       (itoa (if ss (sslength ss) 0)) " ellipse(s) found."))
+      )
+    )
+    (progn
+      (princ "\nSelect ellipses: ")
+      (setq ss (ssget '((0 . "ELLIPSE"))))
+    )
+  )
+
+  (if ss
+    (progn
+      (vla-StartUndoMark doc)
+      (setq cnt 0 vtx 0 lck 0)
+      (repeat (setq i (sslength ss))
+        (setq e (ssname ss (setq i (1- i))))
+        (if (= 4 (logand 4 (cdr (assoc 70 (tblsearch "LAYER" (cdr (assoc 8 (entget e))))))))
+          (setq lck (1+ lck))                         ; skip locked layers
+          (if (setq n (el2pl:convert e tol))
+            (progn
+              (setq cnt (1+ cnt) vtx (+ vtx n))
+              (if (= keep "Delete") (entdel e))
+            )
+          )
+        )
+      )
+      (vla-EndUndoMark doc)
+      (princ (strcat "\nConverted " (itoa cnt) " ellipse(s), "
+                     (itoa vtx) " vertices total"
+                     (if (> lck 0) (strcat ", " (itoa lck) " skipped (locked layer)") "")
+                     "."))
+    )
+    (princ "\nNothing selected.")
+  )
+  (princ)
+)
+
+(princ "\nEL2PL loaded. Type EL2PL to convert ELLIPSE entities to LWPOLYLINE.")
+(princ)

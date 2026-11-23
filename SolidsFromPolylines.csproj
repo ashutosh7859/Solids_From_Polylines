@@ -15,23 +15,23 @@
       <LogicalName>SolidsFromPolylines.%(Filename)%(Extension)</LogicalName>
     </EmbeddedResource>
     <Reference Include="acdbmgd">
-      <HintPath>..\library\references\acdbmgd.dll</HintPath>
+      <HintPath>$(C3DAssembliesPath)/acdbmgd.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="acmgd">
-      <HintPath>..\library\references\acmgd.dll</HintPath>
+      <HintPath>$(C3DAssembliesPath)/acmgd.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="accoremgd">
-      <HintPath>..\library\references\accoremgd.dll</HintPath>
+      <HintPath>$(C3DAssembliesPath)/accoremgd.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="AecBaseMgd">
-      <HintPath>..\library\references\AecBaseMgd.dll</HintPath>
+      <HintPath>$(C3DAssembliesPath)/AecBaseMgd.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="AeccDbMgd">
-      <HintPath>..\library\references\AeccDbMgd.dll</HintPath>
+      <HintPath>$(C3DAssembliesPath)/AeccDbMgd.dll</HintPath>
       <Private>False</Private>
     </Reference>
   </ItemGroup>

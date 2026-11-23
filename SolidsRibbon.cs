@@ -102,6 +102,10 @@ namespace SolidsFromPolylines
                 "01_prepare_markings",
                 "Create closed marking boundaries from selected polylines."));
             GetCollection(panelSource, "Items").Add(CreateButton(
+                ribbonAssembly, "Curves to\nPolylines", "MARKING_CURVES",
+                "05_convert_curves",
+                "Convert standalone circles and full ellipses to closed polylines."));
+            GetCollection(panelSource, "Items").Add(CreateButton(
                 ribbonAssembly, "Create\nSolids", "MARKING_SOLIDS",
                 "02_create_solids",
                 "Create 3D solids from marking boundaries on a selected surface."));
