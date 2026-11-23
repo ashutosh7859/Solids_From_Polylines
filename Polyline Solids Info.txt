@@ -1,6 +1,9 @@
 MARKING_PREP
 Creates closed marking boundaries from horizontal lightweight polylines with positive constant width. Choose continuous or dashed; dashed output needs positive dash and gap lengths. Unsupported paths are kept for review.
 
+MARKING_PREP_BATCH
+Prepares a selection or current-drawing groups summarized by layer, linetype, and width. Configure continuous or dashed output per group; enter positive dash and gap lengths for dashed groups. Invalid geometry, varying widths, and overlaps are summarized and retained for review.
+
 MARKING_CURVES
 Converts selected standalone horizontal circles and full ellipses to closed lightweight polylines. Circles use exact arc segments; ellipses use a requested chord-deviation tolerance. Choose whether to keep or delete the source curves. Unsupported curves are retained.
 

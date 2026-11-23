@@ -1,5 +1,19 @@
 # Batch polyline preparation proposal
 
+## First implementation
+
+The initial workflow is a separate `MARKING_PREP_BATCH` command with a ribbon
+button. Users choose a selection or all lightweight polylines in the current
+space. The form summarizes groups by layer, source linetype, and width, with
+one row per group and counts instead of an entity list. Users can include
+groups, set continuous or dashed output, and apply common dash/gap values to
+multiple selected rows. Dash and gap values are in drawing units.
+
+Positive constant widths and uniform per-segment widths are supported. Varying
+widths, invalid geometry, and overlapping lines are flagged and retained for
+review. Width normalization and automatic interpretation of source linetype
+patterns remain outside this first pass.
+
 ## Current behavior
 
 `MARKING_PREP` currently prepares a selected set of lightweight polylines using one explicit output choice: continuous or dashed. Dashed output prompts for dash and gap lengths. The source polyline's constant/global width becomes the marking width. The command supports horizontal WCS polylines with positive constant width; unsupported or invalid paths are retained and colored yellow, while overlapping straight segments are retained and colored magenta for review.

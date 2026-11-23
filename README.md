@@ -14,8 +14,8 @@ to an arbitrary add-in folder. For automatic loading, install the generated
 `.bundle` folder under `ApplicationPlugins`. For a one-time manual load, use
 `NETLOAD` to select the DLL; the Solids tab is created when the ribbon is ready.
 Commands remain available by name at the Civil 3D command line:
-`MARKING_PREP`, `MARKING_CURVES`, `MARKING_SOLIDS`, `MARKING_BLOCK`, and
-`MARKING_BLOCK_LAYER`.
+`MARKING_PREP`, `MARKING_PREP_BATCH`, `MARKING_CURVES`, `MARKING_SOLIDS`,
+`MARKING_BLOCK`, and `MARKING_BLOCK_LAYER`.
 
 ## Commands
 
@@ -28,6 +28,13 @@ Commands remain available by name at the Civil 3D command line:
   segments are retained and colored magenta for review. Other source polylines
   are erased only when boundary creation succeeds; failed inputs are retained
   and colored yellow.
+- `MARKING_PREP_BATCH` prepares selected polylines or groups from the current
+  space by layer, linetype, and width. A Windows Forms dialog shows one row
+  per group, lets users include groups and choose continuous or dashed output,
+  and accepts dash and gap lengths for dashed groups. Unsupported widths,
+  invalid geometry, and overlaps are summarized by reason and retained for
+  review; the dialog does not list every polyline. Uniform per-segment widths
+  are supported. Varying widths are flagged and skipped.
 - `MARKING_CURVES` converts selected standalone circles and full ellipses into
   closed lightweight polylines. Circles use exact arc segments; ellipses use
   adaptive chord sampling at the requested maximum deviation. Only horizontal

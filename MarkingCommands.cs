@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Runtime.Versioning;
 using Autodesk.AutoCAD.Colors;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
@@ -14,6 +16,7 @@ using CivilSurface = Autodesk.Civil.DatabaseServices.Surface;
 
 namespace SolidsFromPolylines
 {
+    [SupportedOSPlatform("windows")]
     public class MarkingCommands : IExtensionApplication
     {
         private const double GeometryTolerance = 1e-9;
@@ -25,6 +28,7 @@ namespace SolidsFromPolylines
                 .DocumentManager.MdiActiveDocument;
             document?.Editor.WriteMessage(
                 "\nSolidsFromPolylines loaded. Commands: MARKING_PREP, " +
+                "MARKING_PREP_BATCH, " +
                 "MARKING_CURVES, " +
                 "MARKING_SOLIDS, MARKING_BLOCK, MARKING_BLOCK_LAYER.");
             SolidsRibbon.Initialize();
@@ -162,6 +166,238 @@ namespace SolidsFromPolylines
                 $"\nPrepared {succeeded} polyline(s) into {boundariesCreated} " +
                 $"closed boundary/boundaries; {failed} failed, " +
                 $"{overlappingIds.Count} skipped for overlap review.");
+        }
+
+        [CommandMethod("MARKING_PREP_BATCH")]
+        public void PrepareMarkingsBatch()
+        {
+            var document = Autodesk.AutoCAD.ApplicationServices.Application
+                .DocumentManager.MdiActiveDocument;
+            if (document == null)
+            {
+                return;
+            }
+
+            Editor editor = document.Editor;
+            var scopeOptions = new PromptKeywordOptions(
+                "\nBatch source [Selection/Layers]: ");
+            scopeOptions.Keywords.Add("Selection");
+            scopeOptions.Keywords.Add("Layers");
+            PromptResult scopeResult = editor.GetKeywords(scopeOptions);
+            if (scopeResult.Status != PromptStatus.OK)
+            {
+                return;
+            }
+
+            var polylineFilter = new SelectionFilter(new[]
+            {
+                new TypedValue((int)DxfCode.Start, "LWPOLYLINE")
+            });
+            PromptSelectionResult selection =
+                scopeResult.StringResult.Equals(
+                    "Layers", StringComparison.OrdinalIgnoreCase)
+                    ? editor.SelectAll(polylineFilter)
+                    : editor.GetSelection(
+                        new PromptSelectionOptions
+                        {
+                            MessageForAdding = "\nSelect marking polylines: "
+                        },
+                        polylineFilter);
+            if (selection.Status != PromptStatus.OK)
+            {
+                return;
+            }
+
+            var sourceIds = new List<ObjectId>();
+            foreach (SelectedObject selected in selection.Value)
+            {
+                if (selected != null && !selected.ObjectId.IsNull)
+                {
+                    sourceIds.Add(selected.ObjectId);
+                }
+            }
+
+            if (sourceIds.Count == 0)
+            {
+                editor.WriteMessage("\nNo lightweight polylines were found.");
+                return;
+            }
+
+            var groupsByKey = new Dictionary<string, BatchPreparationGroup>(
+                StringComparer.OrdinalIgnoreCase);
+            var groupByObjectId = new Dictionary<ObjectId, BatchPreparationGroup>();
+            foreach (ObjectId sourceId in sourceIds)
+            {
+                string layerName = "(unknown)";
+                string linetypeName = "(unknown)";
+                string widthLabel = "Unsupported";
+                string widthKey = "unsupported";
+                double width = 0;
+                string issue = null;
+
+                try
+                {
+                    using (Transaction transaction = document.Database
+                               .TransactionManager.StartTransaction())
+                    {
+                        var source = transaction.GetObject(
+                            sourceId, OpenMode.ForRead) as Polyline;
+                        if (source == null)
+                        {
+                            issue = "not a lightweight polyline";
+                        }
+                        else
+                        {
+                            layerName = source.Layer;
+                            linetypeName = string.IsNullOrWhiteSpace(source.Linetype)
+                                ? "ByLayer"
+                                : source.Linetype;
+                            if (!TryGetBatchPolylineWidth(
+                                    source, out width, out issue))
+                            {
+                                widthLabel = issue == "Varying width is not supported"
+                                    ? "Varies"
+                                    : "Unsupported";
+                                widthKey = widthLabel.ToLowerInvariant();
+                            }
+                            else
+                            {
+                                widthLabel = width.ToString(
+                                    "0.###", CultureInfo.InvariantCulture);
+                                widthKey = width.ToString(
+                                    "R", CultureInfo.InvariantCulture);
+                                issue = GetBatchGeometryIssue(source);
+                            }
+                        }
+                    }
+                }
+                catch (System.Exception exception)
+                {
+                    issue = $"Invalid geometry: {exception.Message}";
+                }
+
+                string key = string.Concat(
+                    layerName, "\u001f", linetypeName, "\u001f", widthKey);
+                if (!groupsByKey.TryGetValue(key, out BatchPreparationGroup group))
+                {
+                    group = new BatchPreparationGroup(
+                        layerName, linetypeName, widthLabel, key, width);
+                    groupsByKey.Add(key, group);
+                }
+
+                groupByObjectId[sourceId] = group;
+                if (string.IsNullOrEmpty(issue))
+                {
+                    group.EligibleIds.Add(sourceId);
+                }
+                else
+                {
+                    group.AddException(sourceId, issue);
+                }
+            }
+
+            List<BatchPreparationGroup> groups = new List<BatchPreparationGroup>(
+                groupsByKey.Values);
+            groups.Sort((first, second) =>
+            {
+                int layerComparison = StringComparer.OrdinalIgnoreCase.Compare(
+                    first.LayerName, second.LayerName);
+                if (layerComparison != 0)
+                {
+                    return layerComparison;
+                }
+
+                int linetypeComparison = StringComparer.OrdinalIgnoreCase.Compare(
+                    first.LinetypeName, second.LinetypeName);
+                return linetypeComparison != 0
+                    ? linetypeComparison
+                    : StringComparer.OrdinalIgnoreCase.Compare(
+                        first.WidthLabel, second.WidthLabel);
+            });
+
+            HashSet<ObjectId> overlappingIds = FindOverlappingPolylines(
+                document.Database, sourceIds);
+            foreach (ObjectId overlappingId in overlappingIds)
+            {
+                if (groupByObjectId.TryGetValue(
+                        overlappingId, out BatchPreparationGroup group))
+                {
+                    group.AddException(
+                        overlappingId, "overlap needs review");
+                }
+            }
+
+            using (var dialog = new BatchPreparationDialog(groups))
+            {
+                if (Autodesk.AutoCAD.ApplicationServices.Application
+                        .ShowModalDialog(dialog) != Forms.DialogResult.OK)
+                {
+                    return;
+                }
+            }
+
+            int prepared = 0;
+            int failed = 0;
+            int overlapSkipped = 0;
+            int boundariesCreated = 0;
+            foreach (BatchPreparationGroup group in groups)
+            {
+                if (!group.Included)
+                {
+                    continue;
+                }
+
+                foreach (KeyValuePair<ObjectId, string> exception in group.Exceptions)
+                {
+                    if (exception.Value.IndexOf(
+                            "overlap", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        MarkPolylineAsOverlapping(
+                            document.Database, exception.Key, editor);
+                        overlapSkipped++;
+                    }
+                    else
+                    {
+                        MarkPolylineAsFailed(
+                            document.Database, exception.Key, editor);
+                        failed++;
+                    }
+
+                    editor.WriteMessage(
+                        $"\nPolyline {exception.Key.Handle} was retained for review: " +
+                        exception.Value + ".");
+                }
+
+                foreach (ObjectId sourceId in group.EligibleIds)
+                {
+                    try
+                    {
+                        int made = PrepareOne(
+                            document.Database,
+                            sourceId,
+                            group.Dashed,
+                            group.DashLength,
+                            group.GapLength,
+                            group.Width);
+                        boundariesCreated += made;
+                        prepared++;
+                    }
+                    catch (System.Exception exception)
+                    {
+                        failed++;
+                        MarkPolylineAsFailed(
+                            document.Database, sourceId, editor);
+                        editor.WriteMessage(
+                            $"\nPolyline {sourceId.Handle} was retained and " +
+                            $"colored yellow: {exception.Message}");
+                    }
+                }
+            }
+
+            editor.WriteMessage(
+                $"\nBatch preparation created {boundariesCreated} closed " +
+                $"boundary/boundaries from {prepared} polyline(s); {failed} " +
+                $"failed or flagged, {overlapSkipped} skipped for overlap review.");
         }
 
         [CommandMethod("MARKING_CURVES")]
@@ -1012,12 +1248,114 @@ namespace SolidsFromPolylines
             return surfaces;
         }
 
+        private static bool TryGetBatchPolylineWidth(
+            Polyline source,
+            out double width,
+            out string issue)
+        {
+            width = Math.Abs(source.ConstantWidth);
+            issue = null;
+            if (IsFinite(width) && width > GeometryTolerance)
+            {
+                return true;
+            }
+
+            double uniformWidth = 0;
+            bool foundPositiveWidth = false;
+            bool foundZeroWidth = false;
+            int segmentCount = source.Closed
+                ? source.NumberOfVertices
+                : source.NumberOfVertices - 1;
+            for (int index = 0; index < segmentCount; index++)
+            {
+                double startWidth = Math.Abs(source.GetStartWidthAt(index));
+                double endWidth = Math.Abs(source.GetEndWidthAt(index));
+                if (!IsFinite(startWidth) || !IsFinite(endWidth))
+                {
+                    issue = "Invalid width";
+                    return false;
+                }
+
+                if (Math.Abs(startWidth - endWidth) > GeometryTolerance)
+                {
+                    issue = "Varying width is not supported";
+                    return false;
+                }
+
+                if (startWidth <= GeometryTolerance)
+                {
+                    if (foundPositiveWidth)
+                    {
+                        issue = "Varying width is not supported";
+                        return false;
+                    }
+
+                    foundZeroWidth = true;
+                    continue;
+                }
+
+                if (foundZeroWidth)
+                {
+                    issue = "Varying width is not supported";
+                    return false;
+                }
+
+                if (foundPositiveWidth &&
+                    Math.Abs(startWidth - uniformWidth) > GeometryTolerance)
+                {
+                    issue = "Varying width is not supported";
+                    return false;
+                }
+
+                uniformWidth = startWidth;
+                foundPositiveWidth = true;
+            }
+
+            if (!foundPositiveWidth)
+            {
+                issue = "The source polyline must have a positive width";
+                return false;
+            }
+
+            width = uniformWidth;
+            return true;
+        }
+
+        private static string GetBatchGeometryIssue(Polyline source)
+        {
+            if (!source.Normal.IsEqualTo(Vector3d.ZAxis))
+            {
+                return "non-horizontal WCS geometry";
+            }
+
+            if (source.NumberOfVertices < (source.Closed ? 3 : 2))
+            {
+                return "too few vertices";
+            }
+
+            try
+            {
+                double totalLength = source.GetDistanceAtParameter(source.EndParam);
+                if (!IsFinite(totalLength) || totalLength <= GeometryTolerance)
+                {
+                    return "no measurable length";
+                }
+            }
+            catch
+            {
+                return "invalid geometry";
+            }
+
+            return null;
+        }
+
         private static int PrepareOne(
             Database database,
             ObjectId sourceId,
             bool dashed,
             double dashLength,
-            double gapLength)
+            double gapLength,
+            double? widthOverride = null)
         {
             using (Transaction transaction =
                    database.TransactionManager.StartTransaction())
@@ -1042,7 +1380,7 @@ namespace SolidsFromPolylines
                         "The polyline has too few vertices.");
                 }
 
-                double width = Math.Abs(source.ConstantWidth);
+                double width = Math.Abs(widthOverride ?? source.ConstantWidth);
                 if (!IsFinite(width) || width <= GeometryTolerance)
                 {
                     throw new InvalidOperationException(
@@ -2598,6 +2936,7 @@ namespace SolidsFromPolylines
         public string Name { get; }
     }
 
+    [SupportedOSPlatform("windows")]
     internal sealed class SurfaceSelectionDialog : Forms.Form
     {
         public SurfaceSelectionDialog(List<SurfaceChoice> surfaces)
@@ -2681,6 +3020,7 @@ namespace SolidsFromPolylines
         public SurfaceChoice SelectedSurface { get; private set; }
     }
 
+    [SupportedOSPlatform("windows")]
     internal sealed class BlockLayerAssignmentDialog : Forms.Form
     {
         private readonly Forms.ComboBox targetLayerCombo;
