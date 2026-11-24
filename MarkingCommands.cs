@@ -149,9 +149,17 @@ namespace SolidsFromPolylines
                         selectedId,
                         dashed,
                         dashLength,
-                        gapLength);
+                        gapLength,
+                        out bool needsReview);
                     boundariesCreated += made;
                     succeeded++;
+                    if (needsReview)
+                    {
+                        editor.WriteMessage(
+                            $"\nPolyline {selectedId.Handle} was prepared using " +
+                            "closed-offset overlap repair; the original was retained " +
+                            "and colored magenta for review.");
+                    }
                 }
                 catch (System.Exception exception)
                 {
@@ -468,8 +476,9 @@ namespace SolidsFromPolylines
                 $"group(s)?\n\n{dashedGroupCount} group(s) use dashed output; " +
                 $"{overlappingIds.Count} overlapping polyline(s) and " +
                 $"{exceptionCount - overlappingIds.Count} other exception(s) " +
-                "will be retained for review. Successfully prepared source " +
-                "polylines will be erased.";
+                "will be retained for review. Successfully prepared sources are " +
+                "normally erased; closed-offset overlap repairs retain and color " +
+                "their source magenta for review.";
             if (Forms.MessageBox.Show(
                     preview,
                     "Confirm batch preparation",
@@ -491,6 +500,7 @@ namespace SolidsFromPolylines
             int prepared = 0;
             int failed = 0;
             int overlapSkipped = 0;
+            int repairedForReview = 0;
             int boundariesCreated = 0;
             foreach (BatchPreparationGroup group in groups)
             {
@@ -530,9 +540,18 @@ namespace SolidsFromPolylines
                             group.Dashed,
                             group.DashLength,
                             group.GapLength,
+                            out bool needsReview,
                             group.Width);
                         boundariesCreated += made;
                         prepared++;
+                        if (needsReview)
+                        {
+                            repairedForReview++;
+                            editor.WriteMessage(
+                                $"\nPolyline {sourceId.Handle} was prepared using " +
+                                "closed-offset overlap repair; the original was " +
+                                "retained and colored magenta for review.");
+                        }
                     }
                     catch (System.Exception exception)
                     {
@@ -549,7 +568,8 @@ namespace SolidsFromPolylines
             editor.WriteMessage(
                 $"\nBatch preparation created {boundariesCreated} closed " +
                 $"boundary/boundaries from {prepared} polyline(s); {failed} " +
-                $"failed or flagged, {overlapSkipped} skipped for overlap review.");
+                $"failed or flagged, {overlapSkipped} skipped for source overlap " +
+                $"review, {repairedForReview} repaired output(s) retained for review.");
             return true;
         }
 
@@ -1867,8 +1887,10 @@ namespace SolidsFromPolylines
             bool dashed,
             double dashLength,
             double gapLength,
+            out bool needsReview,
             double? widthOverride = null)
         {
+            needsReview = false;
             using (Transaction transaction =
                    database.TransactionManager.StartTransaction())
             {
@@ -1927,7 +1949,8 @@ namespace SolidsFromPolylines
                     else if (!dashed)
                     {
                         boundaries.AddRange(
-                            CreateBoundariesFromPath(source, source, width / 2.0));
+                            CreateBoundariesFromPath(
+                                source, source, width / 2.0, out needsReview));
                     }
                     else
                     {
@@ -1940,7 +1963,7 @@ namespace SolidsFromPolylines
                             {
                                 boundaries.AddRange(
                                     CreateBoundariesFromPath(
-                                        dashPath, source, width / 2.0));
+                                        dashPath, source, width / 2.0, out _));
                             }
 
                             station += dashLength + gapLength;
@@ -1965,7 +1988,16 @@ namespace SolidsFromPolylines
                     }
 
                     source.UpgradeOpen();
-                    source.Erase();
+                    if (needsReview)
+                    {
+                        source.Color =
+                            Color.FromColorIndex(ColorMethod.ByAci, 6);
+                    }
+                    else
+                    {
+                        source.Erase();
+                    }
+
                     transaction.Commit();
                     return boundaries.Count;
                 }
@@ -2271,8 +2303,10 @@ namespace SolidsFromPolylines
         private static List<Polyline> CreateBoundariesFromPath(
             Polyline path,
             Polyline source,
-            double halfWidth)
+            double halfWidth,
+            out bool needsReview)
         {
+            needsReview = false;
             List<Polyline> boundaries = null;
             try
             {
@@ -2288,18 +2322,391 @@ namespace SolidsFromPolylines
                     DisposeAllPolylines(boundaries);
                 }
 
+                System.Exception overlapRepairException = null;
+                if (path.Closed)
+                {
+                    try
+                    {
+                        boundaries = TryCreateClosedOffsetOverlapRepair(
+                            path, source, halfWidth);
+                        if (boundaries != null)
+                        {
+                            needsReview = true;
+                            return boundaries;
+                        }
+                    }
+                    catch (System.Exception exception)
+                    {
+                        overlapRepairException = exception;
+                    }
+                }
+
                 try
                 {
                     return CreateBeveledBufferBoundaries(path, source, halfWidth);
                 }
                 catch (System.Exception repairException)
                 {
+                    string overlapRepairMessage = overlapRepairException == null
+                        ? string.Empty
+                        : $" Closed-offset overlap repair failed: " +
+                          $"{overlapRepairException.Message}";
                     throw new InvalidOperationException(
                         $"Offset preparation failed: {offsetException.Message} " +
+                        $"{overlapRepairMessage} " +
                         $"Beveled-join repair failed: {repairException.Message}",
-                        new AggregateException(offsetException, repairException));
+                        overlapRepairException == null
+                            ? new AggregateException(offsetException, repairException)
+                            : new AggregateException(
+                                offsetException,
+                                overlapRepairException,
+                                repairException));
                 }
             }
+        }
+
+        private static List<Polyline> TryCreateClosedOffsetOverlapRepair(
+            Polyline path,
+            Polyline source,
+            double halfWidth)
+        {
+            DBObjectCollection leftCurves = null;
+            DBObjectCollection rightCurves = null;
+            Region leftRegion = null;
+            Region rightRegion = null;
+            Region difference = null;
+            Vector3d coordinateOffset =
+                GetBoundaryCoordinateOffset(new List<Polyline> { path });
+            try
+            {
+                leftCurves = path.GetOffsetCurves(halfWidth);
+                rightCurves = path.GetOffsetCurves(-halfWidth);
+                leftRegion = CreateUnionOfClosedOffsetLoops(
+                    leftCurves, coordinateOffset);
+                rightRegion = CreateUnionOfClosedOffsetLoops(
+                    rightCurves, coordinateOffset);
+
+                double leftArea = GetRegionArea(leftRegion, 0);
+                double rightArea = GetRegionArea(rightRegion, 0);
+                Region larger = leftArea >= rightArea ? leftRegion : rightRegion;
+                Region smaller = leftArea >= rightArea ? rightRegion : leftRegion;
+                double smallerArea = Math.Min(leftArea, rightArea);
+                double tolerance = Math.Max(
+                    GeometryTolerance, smallerArea * 1e-8);
+
+                using (var intersection = (Region)larger.Clone())
+                using (var smallerCopy = (Region)smaller.Clone())
+                {
+                    intersection.BooleanOperation(
+                        BooleanOperationType.BoolIntersect, smallerCopy);
+                    double overlapArea = intersection.IsNull
+                        ? 0
+                        : GetRegionArea(intersection, 0);
+                    if (overlapArea <= tolerance ||
+                        smallerArea - overlapArea <= tolerance)
+                    {
+                        return null;
+                    }
+                }
+
+                difference = (Region)larger.Clone();
+                using (var smallerCopy = (Region)smaller.Clone())
+                {
+                    difference.BooleanOperation(
+                        BooleanOperationType.BoolSubtract, smallerCopy);
+                }
+
+                if (difference.IsNull ||
+                    GetRegionArea(difference, 0) <= tolerance)
+                {
+                    throw new InvalidOperationException(
+                        "The intersecting offset loops did not leave a usable outline.");
+                }
+
+                List<Polyline> repaired = CreatePolylinesFromRegion(
+                    difference, source, coordinateOffset);
+                try
+                {
+                    if (repaired.Count == 0)
+                    {
+                        throw new InvalidOperationException(
+                            "The overlap repair did not produce closed boundaries.");
+                    }
+
+                    ValidateOffsetBoundaries(repaired, closedPath: false);
+                    return repaired;
+                }
+                catch
+                {
+                    DisposeAllPolylines(repaired);
+                    throw;
+                }
+            }
+            finally
+            {
+                leftRegion?.Dispose();
+                rightRegion?.Dispose();
+                difference?.Dispose();
+                if (leftCurves != null)
+                {
+                    DisposeAll(leftCurves);
+                }
+
+                if (rightCurves != null)
+                {
+                    DisposeAll(rightCurves);
+                }
+            }
+        }
+
+        private static Region CreateUnionOfClosedOffsetLoops(
+            DBObjectCollection offsetCurves,
+            Vector3d coordinateOffset)
+        {
+            if (offsetCurves == null || offsetCurves.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "An offset side did not produce any curves.");
+            }
+
+            Region combined = null;
+            try
+            {
+                foreach (DBObject curveObject in offsetCurves)
+                {
+                    if (curveObject is not Polyline offset || !offset.Closed)
+                    {
+                        throw new InvalidOperationException(
+                            "Overlap repair requires closed lightweight offset loops.");
+                    }
+
+                    using (var localOffset = (Polyline)offset.Clone())
+                    {
+                        localOffset.TransformBy(
+                            Matrix3d.Displacement(-coordinateOffset));
+                        DBObjectCollection curves =
+                            new DBObjectCollection { localOffset };
+                        DBObjectCollection createdRegions =
+                            Region.CreateFromCurves(curves);
+                        try
+                        {
+                            if (createdRegions.Count != 1 ||
+                                createdRegions[0] is not Region candidate)
+                            {
+                                throw new InvalidOperationException(
+                                    "An offset loop is self-intersecting or invalid.");
+                            }
+
+                            if (combined == null)
+                            {
+                                combined = (Region)candidate.Clone();
+                            }
+                            else
+                            {
+                                combined.BooleanOperation(
+                                    BooleanOperationType.BoolUnite, candidate);
+                                if (combined.IsNull)
+                                {
+                                    throw new InvalidOperationException(
+                                        "Offset loops could not be combined.");
+                                }
+                            }
+                        }
+                        finally
+                        {
+                            DisposeAll(createdRegions);
+                        }
+                    }
+                }
+
+                if (combined == null)
+                {
+                    throw new InvalidOperationException(
+                        "An offset side did not produce a valid region.");
+                }
+
+                return combined;
+            }
+            catch
+            {
+                combined?.Dispose();
+                throw;
+            }
+        }
+
+        private static List<Polyline> CreatePolylinesFromRegion(
+            Region region,
+            Polyline source,
+            Vector3d coordinateOffset)
+        {
+            var exploded = new DBObjectCollection();
+            var curves = new List<Curve>();
+            var polylines = new List<Polyline>();
+            try
+            {
+                region.Explode(exploded);
+                foreach (DBObject item in exploded)
+                {
+                    if (item is not Curve curve ||
+                        (curve is not Line && curve is not Arc))
+                    {
+                        throw new InvalidOperationException(
+                            "The overlap repair produced an unsupported boundary curve.");
+                    }
+
+                    curves.Add(curve);
+                }
+
+                bool[] used = new bool[curves.Count];
+                for (int firstIndex = 0; firstIndex < curves.Count; firstIndex++)
+                {
+                    if (used[firstIndex])
+                    {
+                        continue;
+                    }
+
+                    Curve first = curves[firstIndex];
+                    Point3d loopStart = first.StartPoint;
+                    Point3d currentEnd = first.EndPoint;
+                    var edges = new List<(Curve Curve, bool Reversed)>
+                    {
+                        (first, false)
+                    };
+                    used[firstIndex] = true;
+
+                    while (currentEnd.DistanceTo(loopStart) > 1e-7)
+                    {
+                        int nextIndex = -1;
+                        bool reverseNext = false;
+                        for (int candidateIndex = 0;
+                             candidateIndex < curves.Count;
+                             candidateIndex++)
+                        {
+                            if (used[candidateIndex])
+                            {
+                                continue;
+                            }
+
+                            Curve candidate = curves[candidateIndex];
+                            bool startsAtEnd =
+                                candidate.StartPoint.DistanceTo(currentEnd) <= 1e-7;
+                            bool endsAtEnd =
+                                candidate.EndPoint.DistanceTo(currentEnd) <= 1e-7;
+                            if (startsAtEnd == endsAtEnd)
+                            {
+                                continue;
+                            }
+
+                            if (nextIndex >= 0)
+                            {
+                                throw new InvalidOperationException(
+                                    "The overlap repair has an ambiguous junction.");
+                            }
+
+                            nextIndex = candidateIndex;
+                            reverseNext = endsAtEnd;
+                        }
+
+                        if (nextIndex < 0)
+                        {
+                            throw new InvalidOperationException(
+                                "The overlap repair produced an open boundary.");
+                        }
+
+                        Curve next = curves[nextIndex];
+                        edges.Add((next, reverseNext));
+                        used[nextIndex] = true;
+                        currentEnd = reverseNext
+                            ? next.StartPoint
+                            : next.EndPoint;
+                    }
+
+                    var boundary = new Polyline();
+                    try
+                    {
+                        foreach ((Curve curve, bool reversed) in edges)
+                        {
+                            Point3d start = reversed
+                                ? curve.EndPoint
+                                : curve.StartPoint;
+                            boundary.AddVertexAt(
+                                boundary.NumberOfVertices,
+                                new Point2d(start.X, start.Y),
+                                GetBoundaryBulge(curve, reversed),
+                                0,
+                                0);
+                        }
+
+                        boundary.Closed = true;
+                        boundary.TransformBy(
+                            Matrix3d.Displacement(coordinateOffset));
+                        boundary.SetPropertiesFrom(source);
+                        boundary.ConstantWidth = 0;
+                        boundary.Elevation = source.Elevation;
+                        boundary.Normal = source.Normal;
+                        polylines.Add(boundary);
+                    }
+                    catch
+                    {
+                        boundary.Dispose();
+                        throw;
+                    }
+                }
+
+                return polylines;
+            }
+            catch
+            {
+                DisposeAllPolylines(polylines);
+                throw;
+            }
+            finally
+            {
+                DisposeAll(exploded);
+            }
+        }
+
+        private static double GetBoundaryBulge(Curve curve, bool reversed)
+        {
+            if (curve is Line)
+            {
+                return 0;
+            }
+
+            if (curve is not Arc arc)
+            {
+                throw new InvalidOperationException(
+                    "The overlap repair produced an unsupported boundary curve.");
+            }
+
+            double sweep = arc.EndAngle - arc.StartAngle;
+            while (sweep <= 0)
+            {
+                sweep += Math.PI * 2.0;
+            }
+
+            while (sweep > Math.PI * 2.0)
+            {
+                sweep -= Math.PI * 2.0;
+            }
+
+            if (Math.Abs(sweep - Math.PI * 2.0) <= 1e-8)
+            {
+                throw new InvalidOperationException(
+                    "The overlap repair produced a full-circle arc segment.");
+            }
+
+            if (arc.Normal.Z < 0)
+            {
+                sweep = -sweep;
+            }
+
+            if (reversed)
+            {
+                sweep = -sweep;
+            }
+
+            return Math.Tan(sweep / 4.0);
         }
 
         private static List<Polyline> CreateBoundariesFromOffsets(

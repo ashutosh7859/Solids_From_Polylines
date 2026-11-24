@@ -44,8 +44,10 @@ Commands remain available by name at the Civil 3D command line:
   cells. Unsupported widths and invalid geometry are summarized by reason;
   overlaps are checked only among included groups. Exceptions are retained for
   review, and a confirmation summarizes the operation before source polylines
-  are erased. Uniform per-segment widths are supported. Varying widths are
-  flagged and skipped.
+  are erased. Closed-path offsets with a clear partial overlap are trimmed with
+  a planar Boolean operation; the generated boundaries are kept, while the
+  original is retained and colored magenta for review. Uniform per-segment
+  widths are supported. Varying widths are flagged and skipped.
 - `MARKING_CURVES` converts selected standalone circles and full ellipses into
   closed lightweight polylines and asks for a shared positive marking width in
   drawing units. Circles use three exact arc segments; ellipses use adaptive
@@ -81,12 +83,15 @@ offset and region APIs during boundary preparation. Open paths produce capped
 boundaries. Closed paths produce inner and outer loops. The preparation command
 supports horizontal WCS polylines with positive constant width; unsupported or
 invalid paths are retained and colored yellow.
-If exact offsets cross, self-intersect, or collapse, preparation tries a
-beveled-offset fallback while preserving the exact offset result whenever it is
-valid. The fallback keeps flat ends on open paths and does not add round joins.
-If the bevel fallback cannot make valid boundaries, the source is retained and
-reported. If a closed path's inner offset collapses at the requested width, the
-source is retained instead of producing a filled boundary.
+If exact closed offsets partially overlap, preparation first tries a planar
+Boolean repair when the generated loops are valid and unambiguous. Repaired
+boundaries are created while the source is retained and colored magenta for
+review. Other exact-offset failures use a beveled-offset fallback while
+preserving the exact offset result whenever it is valid. The fallback keeps flat
+ends on open paths and does not add round joins. If the repair and bevel
+fallback cannot make valid boundaries, the source is retained and reported. If
+a closed path's inner offset collapses at the requested width, the source is
+retained instead of producing a filled boundary.
 
 Codespaces runs Linux and cannot load the plug-in into Civil 3D. Load it into a
 Civil 3D release whose managed host supports .NET 8 and validate runtime
