@@ -29,17 +29,21 @@ Commands remain available by name at the Civil 3D command line:
   are erased only when boundary creation succeeds; failed inputs are retained
   and colored yellow.
 - `MARKING_PREP_BATCH` prepares selected polylines or groups from the current
-  space by layer, linetype, and width. A Windows Forms dialog shows one row
-  per group, lets users include groups and choose continuous or dashed output,
-  and accepts dash and gap lengths for dashed groups. Select Ready highlights
-  all processable groups; Ctrl/Shift row selections let users apply the toolbar
-  output and dash/gap settings to multiple groups. Toggling Include on a
-  selected row toggles all selected rows. Continuous output clears and disables
-  that row's dash/gap cells. Unsupported widths and invalid geometry are
-  summarized by reason; overlaps are checked only among
-  included groups. Exceptions are retained for review, and a confirmation
-  summarizes the operation before source polylines are erased. Uniform
-  per-segment widths are supported. Varying widths are flagged and skipped.
+  space by layer, linetype, and width. Its modeless Windows Forms dialog lets
+  users continue navigating the drawing, select a group's polylines for visual
+  review, and refresh the table. Changes to source objects mark the snapshot
+  stale; preparation stays disabled until refresh, which preserves settings for
+  unchanged groups and leaves new groups unchecked. The dialog lets users
+  include groups and choose continuous or dashed output, with dash and gap
+  lengths for dashed groups. Select Ready highlights all processable groups;
+  Ctrl/Shift row selections let users apply the toolbar output and dash/gap
+  settings to multiple groups. Toggling Include on a selected row toggles all
+  selected rows. Continuous output clears and disables that row's dash/gap
+  cells. Unsupported widths and invalid geometry are summarized by reason;
+  overlaps are checked only among included groups. Exceptions are retained for
+  review, and a confirmation summarizes the operation before source polylines
+  are erased. Uniform per-segment widths are supported. Varying widths are
+  flagged and skipped.
 - `MARKING_CURVES` converts selected standalone circles and full ellipses into
   closed lightweight polylines. Circles use exact arc segments; ellipses use
   adaptive chord sampling at the requested maximum deviation. Only horizontal

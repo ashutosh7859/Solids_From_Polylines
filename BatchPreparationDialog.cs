@@ -80,6 +80,10 @@ namespace SolidsFromPolylines
     internal sealed class BatchPreparationDialog : Forms.Form
     {
         private readonly Forms.DataGridView groupsGrid;
+        private readonly Forms.Button applyButton;
+        private readonly Forms.Button refreshButton;
+        private readonly Forms.Label statusLabel;
+        private readonly Forms.Label summaryLabel;
         private List<Forms.DataGridViewRow> includeRowsBeforeClick;
         private bool includeValueAfterClick;
         private bool syncingIncludeValues;
@@ -101,8 +105,8 @@ namespace SolidsFromPolylines
                 Location = new Drawing.Point(14, 12),
                 Size = new Drawing.Size(1088, 38),
                 Text = "Choose the groups to prepare and set continuous or dashed output. " +
-                    "Dash/gap use drawing units. Selected-group overlaps are checked " +
-                    "before preparation."
+                    "Use Select to inspect a group in the drawing. Refresh after " +
+                    "drawing edits; dash/gap use drawing units."
             };
             var selectAllButton = new Forms.Button
             {
@@ -148,6 +152,13 @@ namespace SolidsFromPolylines
                 Size = new Drawing.Size(170, 28),
                 Text = "Apply output to rows"
             };
+            refreshButton = new Forms.Button
+            {
+                Anchor = Forms.AnchorStyles.Top | Forms.AnchorStyles.Right,
+                Location = new Drawing.Point(1012, 54),
+                Size = new Drawing.Size(90, 28),
+                Text = "Refresh"
+            };
 
             groupsGrid = new Forms.DataGridView
             {
@@ -164,50 +175,25 @@ namespace SolidsFromPolylines
                 ReadOnly = false,
                 RowHeadersVisible = false,
                 SelectionMode = Forms.DataGridViewSelectionMode.FullRowSelect,
-                Size = new Drawing.Size(1088, 398)
+                Size = new Drawing.Size(1088, 376)
             };
 
             AddColumns();
-            foreach (BatchPreparationGroup group in groups)
+            statusLabel = new Forms.Label
             {
-                int rowIndex = groupsGrid.Rows.Add(
-                    group.EligibleIds.Count > 0,
-                    group.LayerName,
-                    group.LinetypeName,
-                    group.WidthLabel,
-                    group.Count,
-                    group.EligibleIds.Count,
-                    group.ExceptionSummary,
-                    group.Dashed ? "Dash" : "Continuous",
-                    group.DashLength > 0
-                        ? group.DashLength.ToString("G", CultureInfo.InvariantCulture)
-                        : string.Empty,
-                    group.GapLength > 0
-                        ? group.GapLength.ToString("G", CultureInfo.InvariantCulture)
-                        : string.Empty);
-                groupsGrid.Rows[rowIndex].Tag = group;
-                groupsGrid.Rows[rowIndex].Cells[1].ReadOnly = true;
-                groupsGrid.Rows[rowIndex].Cells[2].ReadOnly = true;
-                groupsGrid.Rows[rowIndex].Cells[3].ReadOnly = true;
-                groupsGrid.Rows[rowIndex].Cells[4].ReadOnly = true;
-                groupsGrid.Rows[rowIndex].Cells[5].ReadOnly = true;
-                groupsGrid.Rows[rowIndex].Cells[6].ReadOnly = true;
-                SetDashGapAvailability(
-                    groupsGrid.Rows[rowIndex], group.Dashed, clearWhenContinuous: true);
-            }
-
-            int total = groups.Sum(group => group.Count);
-            int eligible = groups.Sum(group => group.EligibleIds.Count);
-            int exceptionCount = groups.Sum(group => group.Exceptions.Count);
-            var summary = new Forms.Label
+                Anchor = Forms.AnchorStyles.Bottom | Forms.AnchorStyles.Left |
+                    Forms.AnchorStyles.Right,
+                AutoSize = false,
+                Location = new Drawing.Point(14, 470),
+                Size = new Drawing.Size(1088, 20)
+            };
+            summaryLabel = new Forms.Label
             {
                 Anchor = Forms.AnchorStyles.Bottom | Forms.AnchorStyles.Left,
                 AutoSize = true,
-                Location = new Drawing.Point(14, 504),
-                Text = $"{groups.Count} group(s) · {total} polyline(s) · " +
-                    $"{eligible} ready · {exceptionCount} exception(s)"
+                Location = new Drawing.Point(14, 500)
             };
-            var applyButton = new Forms.Button
+            applyButton = new Forms.Button
             {
                 Anchor = Forms.AnchorStyles.Bottom | Forms.AnchorStyles.Right,
                 Location = new Drawing.Point(854, 515),
@@ -217,7 +203,6 @@ namespace SolidsFromPolylines
             var cancelButton = new Forms.Button
             {
                 Anchor = Forms.AnchorStyles.Bottom | Forms.AnchorStyles.Right,
-                DialogResult = Forms.DialogResult.Cancel,
                 Location = new Drawing.Point(982, 515),
                 Size = new Drawing.Size(120, 30),
                 Text = "Cancel"
@@ -253,6 +238,17 @@ namespace SolidsFromPolylines
             bulkOutput.SelectedIndexChanged += (_, _) =>
                 UpdateBulkDashGapAvailability(bulkOutput, bulkDash, bulkGap);
             applyButton.Click += (_, _) => ApplySettings();
+            refreshButton.Click += (_, _) => RefreshRequested?.Invoke();
+            groupsGrid.CellContentClick += (_, e) =>
+            {
+                if (e.RowIndex >= 0 && e.ColumnIndex == 10 &&
+                    groupsGrid.Rows[e.RowIndex].Tag is BatchPreparationGroup group)
+                {
+                    SelectGroupRequested?.Invoke(group);
+                }
+            };
+            cancelButton.Click += (_, _) => Close();
+            FormClosed += (_, _) => DialogClosed?.Invoke();
 
             Controls.Add(instructions);
             Controls.Add(selectAllButton);
@@ -262,13 +258,86 @@ namespace SolidsFromPolylines
             Controls.Add(bulkDash);
             Controls.Add(bulkGap);
             Controls.Add(bulkApplyButton);
+            Controls.Add(refreshButton);
             Controls.Add(groupsGrid);
-            Controls.Add(summary);
+            Controls.Add(statusLabel);
+            Controls.Add(summaryLabel);
             Controls.Add(applyButton);
             Controls.Add(cancelButton);
             AcceptButton = applyButton;
             CancelButton = cancelButton;
+            SetGroups(groups);
+            SetStale(false);
             UpdateBulkDashGapAvailability(bulkOutput, bulkDash, bulkGap);
+        }
+
+        public event Action RefreshRequested;
+        public event Action PrepareRequested;
+        public event Action<BatchPreparationGroup> SelectGroupRequested;
+        public event Action DialogClosed;
+
+        public void SetGroups(List<BatchPreparationGroup> groups)
+        {
+            groupsGrid.Rows.Clear();
+            foreach (BatchPreparationGroup group in groups)
+            {
+                int rowIndex = groupsGrid.Rows.Add(
+                    group.Included,
+                    group.LayerName,
+                    group.LinetypeName,
+                    group.WidthLabel,
+                    group.Count,
+                    group.EligibleIds.Count,
+                    group.ExceptionSummary,
+                    group.Dashed ? "Dash" : "Continuous",
+                    group.DashLength > 0
+                        ? group.DashLength.ToString("G", CultureInfo.InvariantCulture)
+                        : string.Empty,
+                    group.GapLength > 0
+                        ? group.GapLength.ToString("G", CultureInfo.InvariantCulture)
+                        : string.Empty,
+                    "Select");
+                groupsGrid.Rows[rowIndex].Tag = group;
+                groupsGrid.Rows[rowIndex].Cells[1].ReadOnly = true;
+                groupsGrid.Rows[rowIndex].Cells[2].ReadOnly = true;
+                groupsGrid.Rows[rowIndex].Cells[3].ReadOnly = true;
+                groupsGrid.Rows[rowIndex].Cells[4].ReadOnly = true;
+                groupsGrid.Rows[rowIndex].Cells[5].ReadOnly = true;
+                groupsGrid.Rows[rowIndex].Cells[6].ReadOnly = true;
+                groupsGrid.Rows[rowIndex].Cells[10].ReadOnly = true;
+                SetDashGapAvailability(
+                    groupsGrid.Rows[rowIndex], group.Dashed, clearWhenContinuous: true);
+            }
+
+            int total = groups.Sum(group => group.Count);
+            int eligible = groups.Sum(group => group.EligibleIds.Count);
+            int exceptionCount = groups.Sum(group => group.Exceptions.Count);
+            summaryLabel.Text = $"{groups.Count} group(s) · {total} polyline(s) · " +
+                $"{eligible} ready · {exceptionCount} exception(s)";
+            applyButton.Enabled = groups.Any(group => group.EligibleIds.Count > 0);
+        }
+
+        public void SetStale(bool stale)
+        {
+            statusLabel.Text = stale
+                ? "Drawing changed. Refresh to review the updated groups before preparing."
+                : "Drawing snapshot is current.";
+            statusLabel.ForeColor = stale
+                ? Drawing.Color.DarkGoldenrod
+                : Drawing.SystemColors.ControlText;
+            refreshButton.Enabled = true;
+            applyButton.Enabled = !stale &&
+                groupsGrid.Rows.Cast<Forms.DataGridViewRow>().Any(
+                    row => (row.Tag as BatchPreparationGroup)?.EligibleIds.Count > 0);
+        }
+
+        public void SetBusy(bool busy, string message = null)
+        {
+            Enabled = !busy;
+            if (!string.IsNullOrEmpty(message))
+            {
+                statusLabel.Text = message;
+            }
         }
 
         private void CaptureIncludeSelection(
@@ -428,6 +497,14 @@ namespace SolidsFromPolylines
             groupsGrid.Columns.Add(outputColumn);
             groupsGrid.Columns.Add(TextColumn("Dash", 66));
             groupsGrid.Columns.Add(TextColumn("Gap", 66));
+            groupsGrid.Columns.Add(new Forms.DataGridViewButtonColumn
+            {
+                FillWeight = 58,
+                HeaderText = "DWG",
+                Name = "Select",
+                Text = "Select",
+                UseColumnTextForButtonValue = true
+            });
         }
 
         private static Forms.DataGridViewTextBoxColumn TextColumn(
@@ -484,7 +561,6 @@ namespace SolidsFromPolylines
                         "Invalid dash settings",
                         Forms.MessageBoxButtons.OK,
                         Forms.MessageBoxIcon.Warning);
-                    DialogResult = Forms.DialogResult.None;
                     return;
                 }
 
@@ -500,12 +576,45 @@ namespace SolidsFromPolylines
                     "Nothing selected",
                     Forms.MessageBoxButtons.OK,
                     Forms.MessageBoxIcon.Information);
-                DialogResult = Forms.DialogResult.None;
                 return;
             }
 
-            DialogResult = Forms.DialogResult.OK;
-            Close();
+            PrepareRequested?.Invoke();
+        }
+
+        public void CaptureSettings()
+        {
+            groupsGrid.EndEdit();
+            foreach (Forms.DataGridViewRow row in groupsGrid.Rows)
+            {
+                if (row.Tag is not BatchPreparationGroup group)
+                {
+                    continue;
+                }
+
+                group.Included = Convert.ToBoolean(
+                    row.Cells[0].Value ?? false, CultureInfo.InvariantCulture);
+                group.Dashed = string.Equals(
+                    row.Cells[7].Value?.ToString(),
+                    "Dash",
+                    StringComparison.OrdinalIgnoreCase);
+                if (!group.Dashed)
+                {
+                    group.DashLength = 0;
+                    group.GapLength = 0;
+                    continue;
+                }
+
+                if (TryParsePositive(row.Cells[8].Value, out double dashLength))
+                {
+                    group.DashLength = dashLength;
+                }
+
+                if (TryParsePositive(row.Cells[9].Value, out double gapLength))
+                {
+                    group.GapLength = gapLength;
+                }
+            }
         }
 
         private void ApplyBulkSettings(

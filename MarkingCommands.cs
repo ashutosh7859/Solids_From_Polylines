@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Runtime.Versioning;
 using Autodesk.AutoCAD.Colors;
 using Autodesk.AutoCAD.DatabaseServices;
@@ -21,6 +22,7 @@ namespace SolidsFromPolylines
     {
         private const double GeometryTolerance = 1e-9;
         private const string PreparationLayerName = "Marking_Prep";
+        private static BatchPreparationSession activeBatchPreparation;
 
         public void Initialize()
         {
@@ -178,6 +180,12 @@ namespace SolidsFromPolylines
                 return;
             }
 
+            if (activeBatchPreparation != null)
+            {
+                activeBatchPreparation.Focus();
+                return;
+            }
+
             Editor editor = document.Editor;
             var scopeOptions = new PromptKeywordOptions(
                 "\nBatch source [Selection/Layers]: ");
@@ -193,16 +201,16 @@ namespace SolidsFromPolylines
             {
                 new TypedValue((int)DxfCode.Start, "LWPOLYLINE")
             });
-            PromptSelectionResult selection =
-                scopeResult.StringResult.Equals(
-                    "Layers", StringComparison.OrdinalIgnoreCase)
-                    ? editor.SelectAll(polylineFilter)
-                    : editor.GetSelection(
-                        new PromptSelectionOptions
-                        {
-                            MessageForAdding = "\nSelect marking polylines: "
-                        },
-                        polylineFilter);
+            bool allPolylinesScope = scopeResult.StringResult.Equals(
+                "Layers", StringComparison.OrdinalIgnoreCase);
+            PromptSelectionResult selection = allPolylinesScope
+                ? editor.SelectAll(polylineFilter)
+                : editor.GetSelection(
+                    new PromptSelectionOptions
+                    {
+                        MessageForAdding = "\nSelect marking polylines: "
+                    },
+                    polylineFilter);
             if (selection.Status != PromptStatus.OK)
             {
                 return;
@@ -223,11 +231,49 @@ namespace SolidsFromPolylines
                 return;
             }
 
+            List<BatchPreparationGroup> groups = BuildBatchPreparationGroups(
+                document.Database, sourceIds);
+            foreach (BatchPreparationGroup group in groups)
+            {
+                group.Included = group.EligibleIds.Count > 0;
+            }
+
+            activeBatchPreparation = new BatchPreparationSession(
+                document, sourceIds, allPolylinesScope, groups);
+            activeBatchPreparation.Show();
+        }
+
+        [CommandMethod("MARKING_PREP_BATCH_REFRESH")]
+        public void RefreshBatchPreparation()
+        {
+            activeBatchPreparation?.Refresh();
+        }
+
+        [CommandMethod("MARKING_PREP_BATCH_SELECT")]
+        public void SelectBatchPreparationGroup()
+        {
+            activeBatchPreparation?.SelectRequestedGroup();
+        }
+
+        [CommandMethod("MARKING_PREP_BATCH_APPLY")]
+        public void ApplyBatchPreparation()
+        {
+            activeBatchPreparation?.Apply();
+        }
+
+        private static List<BatchPreparationGroup> BuildBatchPreparationGroups(
+            Database database,
+            IEnumerable<ObjectId> sourceIds)
+        {
             var groupsByKey = new Dictionary<string, BatchPreparationGroup>(
                 StringComparer.OrdinalIgnoreCase);
-            var groupByObjectId = new Dictionary<ObjectId, BatchPreparationGroup>();
             foreach (ObjectId sourceId in sourceIds)
             {
+                if (sourceId.IsNull || !sourceId.IsValid || sourceId.IsErased)
+                {
+                    continue;
+                }
+
                 string layerName = "(unknown)";
                 string linetypeName = "(unknown)";
                 string widthLabel = "Unsupported";
@@ -237,8 +283,8 @@ namespace SolidsFromPolylines
 
                 try
                 {
-                    using (Transaction transaction = document.Database
-                               .TransactionManager.StartTransaction())
+                    using (Transaction transaction =
+                           database.TransactionManager.StartTransaction())
                     {
                         var source = transaction.GetObject(
                             sourceId, OpenMode.ForRead) as Polyline;
@@ -278,14 +324,14 @@ namespace SolidsFromPolylines
 
                 string key = string.Concat(
                     layerName, "\u001f", linetypeName, "\u001f", widthKey);
-                if (!groupsByKey.TryGetValue(key, out BatchPreparationGroup group))
+                if (!groupsByKey.TryGetValue(
+                        key, out BatchPreparationGroup group))
                 {
                     group = new BatchPreparationGroup(
                         layerName, linetypeName, widthLabel, key, width);
                     groupsByKey.Add(key, group);
                 }
 
-                groupByObjectId[sourceId] = group;
                 if (string.IsNullOrEmpty(issue))
                 {
                     group.EligibleIds.Add(sourceId);
@@ -296,8 +342,7 @@ namespace SolidsFromPolylines
                 }
             }
 
-            List<BatchPreparationGroup> groups = new List<BatchPreparationGroup>(
-                groupsByKey.Values);
+            var groups = new List<BatchPreparationGroup>(groupsByKey.Values);
             groups.Sort((first, second) =>
             {
                 int layerComparison = StringComparer.OrdinalIgnoreCase.Compare(
@@ -314,16 +359,79 @@ namespace SolidsFromPolylines
                     : StringComparer.OrdinalIgnoreCase.Compare(
                         first.WidthLabel, second.WidthLabel);
             });
+            return groups;
+        }
 
-            using (var dialog = new BatchPreparationDialog(groups))
+        private static List<ObjectId> GetAllBatchPolylineIds(Editor editor)
+        {
+            var filter = new SelectionFilter(new[]
             {
-                if (Autodesk.AutoCAD.ApplicationServices.Application
-                        .ShowModalDialog(dialog) != Forms.DialogResult.OK)
+                new TypedValue((int)DxfCode.Start, "LWPOLYLINE")
+            });
+            PromptSelectionResult selection = editor.SelectAll(filter);
+            var ids = new List<ObjectId>();
+            if (selection.Status != PromptStatus.OK)
+            {
+                return ids;
+            }
+
+            foreach (SelectedObject selected in selection.Value)
+            {
+                if (selected != null && !selected.ObjectId.IsNull)
                 {
-                    return;
+                    ids.Add(selected.ObjectId);
                 }
             }
 
+            return ids;
+        }
+
+        private static bool HaveSameBatchSnapshot(
+            List<BatchPreparationGroup> first,
+            List<BatchPreparationGroup> second)
+        {
+            if (first.Count != second.Count)
+            {
+                return false;
+            }
+
+            var secondByKey = second.ToDictionary(
+                group => group.Key, StringComparer.OrdinalIgnoreCase);
+            foreach (BatchPreparationGroup firstGroup in first)
+            {
+                if (!secondByKey.TryGetValue(
+                        firstGroup.Key, out BatchPreparationGroup secondGroup) ||
+                    !firstGroup.EligibleIds.ToHashSet()
+                        .SetEquals(secondGroup.EligibleIds) ||
+                    !firstGroup.Exceptions.Keys.ToHashSet()
+                        .SetEquals(secondGroup.Exceptions.Keys))
+                {
+                    return false;
+                }
+
+                foreach (KeyValuePair<ObjectId, string> exception
+                         in firstGroup.Exceptions)
+                {
+                    if (!secondGroup.Exceptions.TryGetValue(
+                            exception.Key, out string currentReason) ||
+                        !string.Equals(
+                            exception.Value, currentReason,
+                            StringComparison.Ordinal))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        private static bool ExecuteBatchPreparation(
+            Autodesk.AutoCAD.ApplicationServices.Document document,
+            List<BatchPreparationGroup> groups,
+            Dictionary<ObjectId, BatchPreparationGroup> groupByObjectId)
+        {
+            Editor editor = document.Editor;
             var includedGroups = new List<BatchPreparationGroup>();
             var includedIds = new List<ObjectId>();
             foreach (BatchPreparationGroup group in groups)
@@ -339,23 +447,17 @@ namespace SolidsFromPolylines
 
             HashSet<ObjectId> overlappingIds = FindOverlappingPolylines(
                 document.Database, includedIds);
-            foreach (ObjectId overlappingId in overlappingIds)
-            {
-                if (groupByObjectId.TryGetValue(
-                        overlappingId, out BatchPreparationGroup group))
-                {
-                    group.AddException(overlappingId, "overlap needs review");
-                }
-            }
 
             int readyCount = 0;
             int exceptionCount = 0;
             int dashedGroupCount = 0;
             foreach (BatchPreparationGroup group in includedGroups)
             {
-                readyCount += group.EligibleIds.Count;
-                exceptionCount += group.Exceptions.Count;
-                if (group.Dashed && group.EligibleIds.Count > 0)
+                int groupOverlapCount = group.EligibleIds.Count(
+                    overlappingIds.Contains);
+                readyCount += group.EligibleIds.Count - groupOverlapCount;
+                exceptionCount += group.Exceptions.Count + groupOverlapCount;
+                if (group.Dashed && group.EligibleIds.Count > groupOverlapCount)
                 {
                     dashedGroupCount++;
                 }
@@ -374,7 +476,16 @@ namespace SolidsFromPolylines
                     Forms.MessageBoxButtons.YesNo,
                     Forms.MessageBoxIcon.Warning) != Forms.DialogResult.Yes)
             {
-                return;
+                return false;
+            }
+
+            foreach (ObjectId overlappingId in overlappingIds)
+            {
+                if (groupByObjectId.TryGetValue(
+                        overlappingId, out BatchPreparationGroup group))
+                {
+                    group.AddException(overlappingId, "overlap needs review");
+                }
             }
 
             int prepared = 0;
@@ -439,6 +550,349 @@ namespace SolidsFromPolylines
                 $"\nBatch preparation created {boundariesCreated} closed " +
                 $"boundary/boundaries from {prepared} polyline(s); {failed} " +
                 $"failed or flagged, {overlapSkipped} skipped for overlap review.");
+            return true;
+        }
+
+        private sealed class BatchPreparationSession : IDisposable
+        {
+            private readonly Autodesk.AutoCAD.ApplicationServices.Document document;
+            private readonly bool allPolylinesScope;
+            private readonly BatchPreparationDialog dialog;
+            private readonly HashSet<ObjectId> trackedIds;
+            private List<ObjectId> sourceIds;
+            private List<BatchPreparationGroup> groups;
+            private BatchPreparationGroup requestedGroup;
+            private bool stale;
+            private bool requestQueued;
+            private bool applying;
+            private bool disposed;
+
+            public BatchPreparationSession(
+                Autodesk.AutoCAD.ApplicationServices.Document document,
+                List<ObjectId> sourceIds,
+                bool allPolylinesScope,
+                List<BatchPreparationGroup> groups)
+            {
+                this.document = document;
+                this.sourceIds = new List<ObjectId>(sourceIds);
+                this.allPolylinesScope = allPolylinesScope;
+                this.groups = groups;
+                trackedIds = new HashSet<ObjectId>(sourceIds);
+                dialog = new BatchPreparationDialog(groups);
+                dialog.RefreshRequested += RequestRefresh;
+                dialog.PrepareRequested += RequestApply;
+                dialog.SelectGroupRequested += RequestSelectGroup;
+                dialog.DialogClosed += Dispose;
+                document.Database.ObjectModified += OnObjectModified;
+                document.Database.ObjectErased += OnObjectErased;
+                document.Database.ObjectAppended += OnObjectAppended;
+            }
+
+            public void Show()
+            {
+                try
+                {
+                    Autodesk.AutoCAD.ApplicationServices.Application
+                        .ShowModelessDialog(dialog);
+                }
+                catch
+                {
+                    Dispose();
+                    throw;
+                }
+            }
+
+            public void Focus()
+            {
+                if (dialog.IsDisposed)
+                {
+                    return;
+                }
+
+                if (dialog.WindowState == Forms.FormWindowState.Minimized)
+                {
+                    dialog.WindowState = Forms.FormWindowState.Normal;
+                }
+
+                dialog.Activate();
+            }
+
+            public void Refresh()
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                try
+                {
+                    dialog.CaptureSettings();
+                    Dictionary<string, BatchPreparationGroup> previous =
+                        groups.ToDictionary(
+                            group => group.Key,
+                            StringComparer.OrdinalIgnoreCase);
+                    List<ObjectId> refreshedIds = GetCurrentSourceIds();
+                    List<BatchPreparationGroup> refreshedGroups =
+                        BuildBatchPreparationGroups(document.Database, refreshedIds);
+                    foreach (BatchPreparationGroup group in refreshedGroups)
+                    {
+                        if (!previous.TryGetValue(
+                                group.Key, out BatchPreparationGroup oldGroup))
+                        {
+                            continue;
+                        }
+
+                        group.Included = oldGroup.Included;
+                        group.Dashed = oldGroup.Dashed;
+                        group.DashLength = oldGroup.DashLength;
+                        group.GapLength = oldGroup.GapLength;
+                    }
+
+                    sourceIds = refreshedIds;
+                    trackedIds.Clear();
+                    trackedIds.UnionWith(refreshedIds);
+                    groups = refreshedGroups;
+                    stale = false;
+                    dialog.SetGroups(groups);
+                    dialog.SetStale(false);
+                }
+                catch (System.Exception exception)
+                {
+                    ShowError("Unable to refresh the batch groups", exception);
+                }
+                finally
+                {
+                    CompleteRequest();
+                }
+            }
+
+            public void SelectRequestedGroup()
+            {
+                try
+                {
+                    if (requestedGroup == null)
+                    {
+                        return;
+                    }
+
+                    ObjectId[] ids = requestedGroup.EligibleIds
+                        .Concat(requestedGroup.Exceptions.Keys)
+                        .Where(id => id.IsValid && !id.IsErased)
+                        .Distinct()
+                        .ToArray();
+                    document.Editor.SetImpliedSelection(ids);
+                    document.Editor.UpdateScreen();
+                    document.Editor.WriteMessage(
+                        $"\nSelected {ids.Length} polyline(s) from layer " +
+                        $"'{requestedGroup.LayerName}'.");
+                }
+                catch (System.Exception exception)
+                {
+                    ShowError("Unable to select the group in the drawing", exception);
+                }
+                finally
+                {
+                    requestedGroup = null;
+                    CompleteRequest();
+                }
+            }
+
+            public void Apply()
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                try
+                {
+                    if (stale)
+                    {
+                        dialog.SetStale(true);
+                        return;
+                    }
+
+                    List<ObjectId> currentIds = GetCurrentSourceIds();
+                    List<BatchPreparationGroup> currentGroups =
+                        BuildBatchPreparationGroups(document.Database, currentIds);
+                    if (!HaveSameBatchSnapshot(groups, currentGroups))
+                    {
+                        MarkStale();
+                        return;
+                    }
+
+                    applying = true;
+                    var groupByObjectId =
+                        new Dictionary<ObjectId, BatchPreparationGroup>();
+                    foreach (BatchPreparationGroup group in groups)
+                    {
+                        foreach (ObjectId id in group.EligibleIds)
+                        {
+                            groupByObjectId[id] = group;
+                        }
+
+                        foreach (ObjectId id in group.Exceptions.Keys)
+                        {
+                            groupByObjectId[id] = group;
+                        }
+                    }
+
+                    if (ExecuteBatchPreparation(
+                            document, groups, groupByObjectId))
+                    {
+                        Dispose();
+                        dialog.Close();
+                        return;
+                    }
+
+                    applying = false;
+                }
+                catch (System.Exception exception)
+                {
+                    applying = false;
+                    ShowError("Unable to prepare the selected groups", exception);
+                }
+                finally
+                {
+                    CompleteRequest();
+                }
+            }
+
+            public void Dispose()
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                disposed = true;
+                document.Database.ObjectModified -= OnObjectModified;
+                document.Database.ObjectErased -= OnObjectErased;
+                document.Database.ObjectAppended -= OnObjectAppended;
+                dialog.RefreshRequested -= RequestRefresh;
+                dialog.PrepareRequested -= RequestApply;
+                dialog.SelectGroupRequested -= RequestSelectGroup;
+                dialog.DialogClosed -= Dispose;
+                if (ReferenceEquals(activeBatchPreparation, this))
+                {
+                    activeBatchPreparation = null;
+                }
+            }
+
+            private void RequestRefresh()
+            {
+                QueueCommand("MARKING_PREP_BATCH_REFRESH", "Refreshing groups...");
+            }
+
+            private void RequestSelectGroup(BatchPreparationGroup group)
+            {
+                requestedGroup = group;
+                QueueCommand("MARKING_PREP_BATCH_SELECT", "Selecting group...");
+            }
+
+            private void RequestApply()
+            {
+                QueueCommand("MARKING_PREP_BATCH_APPLY", "Checking the drawing...");
+            }
+
+            private void QueueCommand(string command, string message)
+            {
+                if (disposed || requestQueued)
+                {
+                    return;
+                }
+
+                requestQueued = true;
+                dialog.SetBusy(true, message);
+                try
+                {
+                    document.SendStringToExecute(
+                        $"._{command}\n", true, false, true);
+                }
+                catch (System.Exception exception)
+                {
+                    CompleteRequest();
+                    ShowError("Unable to start the batch action", exception);
+                }
+            }
+
+            private List<ObjectId> GetCurrentSourceIds()
+            {
+                if (allPolylinesScope)
+                {
+                    return GetAllBatchPolylineIds(document.Editor);
+                }
+
+                return sourceIds
+                    .Where(id => id.IsValid && !id.IsErased)
+                    .ToList();
+            }
+
+            private void OnObjectModified(object sender, ObjectEventArgs e)
+            {
+                if (!applying && e.DBObject != null &&
+                    trackedIds.Contains(e.DBObject.ObjectId))
+                {
+                    MarkStale();
+                }
+            }
+
+            private void OnObjectErased(object sender, ObjectErasedEventArgs e)
+            {
+                if (!applying && e.DBObject != null &&
+                    trackedIds.Contains(e.DBObject.ObjectId))
+                {
+                    MarkStale();
+                }
+            }
+
+            private void OnObjectAppended(object sender, ObjectEventArgs e)
+            {
+                if (!applying && allPolylinesScope &&
+                    e.DBObject is Polyline)
+                {
+                    MarkStale();
+                }
+            }
+
+            private void MarkStale()
+            {
+                if (disposed || stale)
+                {
+                    return;
+                }
+
+                stale = true;
+                dialog.SetStale(true);
+            }
+
+            private void CompleteRequest()
+            {
+                requestQueued = false;
+                if (!disposed && !dialog.IsDisposed)
+                {
+                    dialog.SetBusy(false);
+                    if (stale)
+                    {
+                        dialog.SetStale(true);
+                    }
+                }
+            }
+
+            private void ShowError(string title, System.Exception exception)
+            {
+                document.Editor.WriteMessage(
+                    $"\n{title}: {exception.Message}");
+                if (!dialog.IsDisposed)
+                {
+                    Forms.MessageBox.Show(
+                        dialog,
+                        $"{title}:\n{exception.Message}",
+                        "Batch Polyline Preparation",
+                        Forms.MessageBoxButtons.OK,
+                        Forms.MessageBoxIcon.Error);
+                }
+            }
         }
 
         [CommandMethod("MARKING_CURVES")]
