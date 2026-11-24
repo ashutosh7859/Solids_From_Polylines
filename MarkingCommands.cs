@@ -947,6 +947,21 @@ namespace SolidsFromPolylines
                 return;
             }
 
+            PromptDoubleResult widthResult = editor.GetDouble(
+                new PromptDoubleOptions("\nEnter marking width: ")
+                {
+                    AllowZero = false,
+                    AllowNegative = false
+                });
+            if (widthResult.Status != PromptStatus.OK ||
+                !IsFinite(widthResult.Value) ||
+                widthResult.Value <= GeometryTolerance)
+            {
+                editor.WriteMessage(
+                    "\nMarking width must be a positive finite number.");
+                return;
+            }
+
             double tolerance = 0.01;
             if (ellipseCount > 0)
             {
@@ -998,8 +1013,10 @@ namespace SolidsFromPolylines
                             as Entity;
                         Polyline convertedPolyline = source switch
                         {
-                            Circle circle => CircleToPolyline(circle),
-                            Ellipse ellipse => EllipseToPolyline(ellipse, tolerance),
+                            Circle circle => CircleToPolyline(
+                                circle, widthResult.Value),
+                            Ellipse ellipse => EllipseToPolyline(
+                                ellipse, tolerance, widthResult.Value),
                             _ => null
                         };
 
@@ -1893,7 +1910,21 @@ namespace SolidsFromPolylines
                 var boundaries = new List<Polyline>();
                 try
                 {
-                    if (!dashed)
+                    if (TryGetConvertedCircleGeometry(
+                            source, out Point2d circleCenter,
+                            out double circleRadius, out double circleStartAngle,
+                            out double circleDirection))
+                    {
+                        boundaries.AddRange(dashed
+                            ? CreateCircularDashBoundaries(
+                                source, circleCenter, circleRadius,
+                                circleStartAngle, circleDirection, width,
+                                dashLength, gapLength)
+                            : CreateCircularRingBoundaries(
+                                source, circleCenter, circleRadius,
+                                circleStartAngle, circleDirection, width));
+                    }
+                    else if (!dashed)
                     {
                         boundaries.AddRange(
                             CreateBoundariesFromPath(source, source, width / 2.0));
@@ -1953,6 +1984,271 @@ namespace SolidsFromPolylines
             }
         }
 
+        private static bool TryGetConvertedCircleGeometry(
+            Polyline source,
+            out Point2d center,
+            out double radius,
+            out double startAngle,
+            out double direction)
+        {
+            center = Point2d.Origin;
+            radius = 0;
+            startAngle = 0;
+            direction = 0;
+            if (!source.Closed || source.NumberOfVertices != 3)
+            {
+                return false;
+            }
+
+            double expectedBulge = Math.Tan(Math.PI / 6.0);
+            double firstBulge = source.GetBulgeAt(0);
+            if (Math.Abs(Math.Abs(firstBulge) - expectedBulge) > 1e-8)
+            {
+                return false;
+            }
+
+            direction = Math.Sign(firstBulge);
+            for (int index = 1; index < source.NumberOfVertices; index++)
+            {
+                double bulge = source.GetBulgeAt(index);
+                if (Math.Sign(bulge) != direction ||
+                    Math.Abs(Math.Abs(bulge) - expectedBulge) > 1e-8)
+                {
+                    return false;
+                }
+            }
+
+            Point2d first = source.GetPoint2dAt(0);
+            Point2d second = source.GetPoint2dAt(1);
+            Point2d third = source.GetPoint2dAt(2);
+            center = new Point2d(
+                (first.X + second.X + third.X) / 3.0,
+                (first.Y + second.Y + third.Y) / 3.0);
+            radius = center.GetDistanceTo(first);
+            double tolerance = Math.Max(GeometryTolerance, radius * 1e-8);
+            if (!IsFinite(radius) || radius <= GeometryTolerance ||
+                Math.Abs(center.GetDistanceTo(second) - radius) > tolerance ||
+                Math.Abs(center.GetDistanceTo(third) - radius) > tolerance)
+            {
+                return false;
+            }
+
+            double firstChord = first.GetDistanceTo(second);
+            double secondChord = second.GetDistanceTo(third);
+            double thirdChord = third.GetDistanceTo(first);
+            if (Math.Abs(firstChord - secondChord) > tolerance ||
+                Math.Abs(secondChord - thirdChord) > tolerance)
+            {
+                return false;
+            }
+
+            startAngle = Math.Atan2(first.Y - center.Y, first.X - center.X);
+            return true;
+        }
+
+        private static List<Polyline> CreateCircularRingBoundaries(
+            Polyline source,
+            Point2d center,
+            double radius,
+            double startAngle,
+            double direction,
+            double width)
+        {
+            double halfWidth = width / 2.0;
+            double innerRadius = radius - halfWidth;
+            if (innerRadius <= GeometryTolerance)
+            {
+                throw new InvalidOperationException(
+                    "The circular marking width consumes the circle's interior.");
+            }
+
+            var boundaries = new List<Polyline>();
+            try
+            {
+                boundaries.Add(CreateCircularLoop(
+                    source, center, radius + halfWidth, startAngle, direction));
+                boundaries.Add(CreateCircularLoop(
+                    source, center, innerRadius, startAngle, -direction));
+                return boundaries;
+            }
+            catch
+            {
+                DisposeAllPolylines(boundaries);
+                throw;
+            }
+        }
+
+        private static List<Polyline> CreateCircularDashBoundaries(
+            Polyline source,
+            Point2d center,
+            double radius,
+            double startAngle,
+            double direction,
+            double width,
+            double dashLength,
+            double gapLength)
+        {
+            if (!IsFinite(dashLength) || dashLength <= GeometryTolerance ||
+                !IsFinite(gapLength) || gapLength <= GeometryTolerance)
+            {
+                throw new InvalidOperationException(
+                    "Dash and gap lengths must be positive finite numbers.");
+            }
+
+            double circumference = 2.0 * Math.PI * radius;
+            var boundaries = new List<Polyline>();
+            try
+            {
+                double station = 0;
+                while (station < circumference - GeometryTolerance)
+                {
+                    double finish = Math.Min(circumference, station + dashLength);
+                    double currentDashLength = finish - station;
+                    if (!IsFinite(currentDashLength) ||
+                        currentDashLength <= GeometryTolerance)
+                    {
+                        throw new InvalidOperationException(
+                            "A circular dash is too short to create valid geometry.");
+                    }
+
+                    if (currentDashLength >= circumference - GeometryTolerance)
+                    {
+                        boundaries.AddRange(CreateCircularRingBoundaries(
+                            source, center, radius, startAngle, direction, width));
+                    }
+                    else
+                    {
+                        boundaries.Add(CreateCircularDashBoundary(
+                            source, center, radius, startAngle, direction,
+                            width, station, currentDashLength));
+                    }
+
+                    double nextStation = station + dashLength + gapLength;
+                    if (nextStation <= station)
+                    {
+                        throw new InvalidOperationException(
+                            "The dash and gap are too small to advance along the circle.");
+                    }
+
+                    station = nextStation;
+                }
+
+                return boundaries;
+            }
+            catch
+            {
+                DisposeAllPolylines(boundaries);
+                throw;
+            }
+        }
+
+        private static Polyline CreateCircularDashBoundary(
+            Polyline source,
+            Point2d center,
+            double radius,
+            double startAngle,
+            double direction,
+            double width,
+            double station,
+            double dashLength)
+        {
+            double halfWidth = width / 2.0;
+            double innerRadius = radius - halfWidth;
+            if (innerRadius <= GeometryTolerance)
+            {
+                throw new InvalidOperationException(
+                    "The circular marking width consumes the circle's interior.");
+            }
+
+            double sweep = direction * dashLength / radius;
+            if (!IsFinite(sweep) ||
+                Math.Abs(sweep) >= (2.0 * Math.PI) - GeometryTolerance)
+            {
+                throw new InvalidOperationException(
+                    "The circular dash sweep is not a valid open arc.");
+            }
+
+            double dashStartAngle = startAngle + direction * station / radius;
+            double dashEndAngle = dashStartAngle + sweep;
+            var points = new[]
+            {
+                PointOnCircle(center, radius + halfWidth, dashStartAngle),
+                PointOnCircle(center, radius + halfWidth, dashEndAngle),
+                PointOnCircle(center, innerRadius, dashEndAngle),
+                PointOnCircle(center, innerRadius, dashStartAngle)
+            };
+
+            var boundary = new Polyline();
+            try
+            {
+                boundary.SetPropertiesFrom(source);
+                boundary.ConstantWidth = 0;
+                boundary.Elevation = source.Elevation;
+                boundary.Normal = Vector3d.ZAxis;
+                boundary.AddVertexAt(
+                    0, points[0], Math.Tan(sweep / 4.0), 0, 0);
+                boundary.AddVertexAt(1, points[1], 0, 0, 0);
+                boundary.AddVertexAt(
+                    2, points[2], -Math.Tan(sweep / 4.0), 0, 0);
+                boundary.AddVertexAt(3, points[3], 0, 0, 0);
+                boundary.Closed = true;
+                return boundary;
+            }
+            catch
+            {
+                boundary.Dispose();
+                throw;
+            }
+        }
+
+        private static Polyline CreateCircularLoop(
+            Polyline source,
+            Point2d center,
+            double radius,
+            double startAngle,
+            double direction)
+        {
+            var boundary = new Polyline();
+            try
+            {
+                boundary.SetPropertiesFrom(source);
+                boundary.ConstantWidth = 0;
+                boundary.Elevation = source.Elevation;
+                boundary.Normal = Vector3d.ZAxis;
+                double sweep = direction * (2.0 * Math.PI / 3.0);
+                double bulge = Math.Tan(sweep / 4.0);
+                for (int index = 0; index < 3; index++)
+                {
+                    boundary.AddVertexAt(
+                        index,
+                        PointOnCircle(
+                            center, radius,
+                            startAngle + direction * (2.0 * Math.PI * index / 3.0)),
+                        bulge,
+                        0,
+                        0);
+                }
+
+                boundary.Closed = true;
+                return boundary;
+            }
+            catch
+            {
+                boundary.Dispose();
+                throw;
+            }
+        }
+
+        private static Point2d PointOnCircle(
+            Point2d center,
+            double radius,
+            double angle)
+        {
+            return new Point2d(
+                center.X + radius * Math.Cos(angle),
+                center.Y + radius * Math.Sin(angle));
+        }
+
         private static ObjectId GetOrCreateLayer(
             Transaction transaction,
             Database database,
@@ -1977,10 +2273,46 @@ namespace SolidsFromPolylines
             Polyline source,
             double halfWidth)
         {
-            DBObjectCollection leftCurves = path.GetOffsetCurves(halfWidth);
-            DBObjectCollection rightCurves = path.GetOffsetCurves(-halfWidth);
+            List<Polyline> boundaries = null;
             try
             {
+                boundaries = CreateBoundariesFromOffsets(
+                    path, source, halfWidth);
+                ValidateOffsetBoundaries(boundaries, path.Closed);
+                return boundaries;
+            }
+            catch (System.Exception offsetException)
+            {
+                if (boundaries != null)
+                {
+                    DisposeAllPolylines(boundaries);
+                }
+
+                try
+                {
+                    return CreateBeveledBufferBoundaries(path, source, halfWidth);
+                }
+                catch (System.Exception repairException)
+                {
+                    throw new InvalidOperationException(
+                        $"Offset preparation failed: {offsetException.Message} " +
+                        $"Beveled-join repair failed: {repairException.Message}",
+                        new AggregateException(offsetException, repairException));
+                }
+            }
+        }
+
+        private static List<Polyline> CreateBoundariesFromOffsets(
+            Polyline path,
+            Polyline source,
+            double halfWidth)
+        {
+            DBObjectCollection leftCurves = null;
+            DBObjectCollection rightCurves = null;
+            try
+            {
+                leftCurves = path.GetOffsetCurves(halfWidth);
+                rightCurves = path.GetOffsetCurves(-halfWidth);
                 Polyline left = RequireSingleOffset(leftCurves);
                 Polyline right = RequireSingleOffset(rightCurves);
 
@@ -1993,11 +2325,18 @@ namespace SolidsFromPolylines
                             "The closed offset did not produce two distinct loops.");
                     }
 
-                    return new List<Polyline>
+                    var boundaries = new List<Polyline>();
+                    try
                     {
-                        CopyClosedOffset(left, source),
-                        CopyClosedOffset(right, source)
-                    };
+                        boundaries.Add(CopyClosedOffset(left, source));
+                        boundaries.Add(CopyClosedOffset(right, source));
+                        return boundaries;
+                    }
+                    catch
+                    {
+                        DisposeAllPolylines(boundaries);
+                        throw;
+                    }
                 }
 
                 if (left.Closed || right.Closed)
@@ -2013,8 +2352,426 @@ namespace SolidsFromPolylines
             }
             finally
             {
-                DisposeAll(leftCurves);
-                DisposeAll(rightCurves);
+                if (leftCurves != null)
+                {
+                    DisposeAll(leftCurves);
+                }
+
+                if (rightCurves != null)
+                {
+                    DisposeAll(rightCurves);
+                }
+            }
+        }
+
+        private static void ValidateOffsetBoundaries(
+            List<Polyline> boundaries,
+            bool closedPath)
+        {
+            if (boundaries.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "The offsets did not produce any boundaries.");
+            }
+
+            var regions = new List<Region>();
+            Vector3d coordinateOffset = GetBoundaryCoordinateOffset(boundaries);
+            try
+            {
+                foreach (Polyline boundary in boundaries)
+                {
+                    using (var localBoundary = (Polyline)boundary.Clone())
+                    {
+                        localBoundary.TransformBy(
+                            Matrix3d.Displacement(-coordinateOffset));
+                        DBObjectCollection curves =
+                            new DBObjectCollection { localBoundary };
+                        DBObjectCollection createdRegions =
+                            Region.CreateFromCurves(curves);
+                        if (createdRegions.Count != 1 ||
+                            createdRegions[0] is not Region region)
+                        {
+                            DisposeAll(createdRegions);
+                            throw new InvalidOperationException(
+                                "An offset boundary is self-intersecting or invalid.");
+                        }
+
+                        regions.Add(region);
+                    }
+                }
+
+                if (closedPath && regions.Count == 2)
+                {
+                    using (var intersection = (Region)regions[0].Clone())
+                    using (var other = (Region)regions[1].Clone())
+                    {
+                        intersection.BooleanOperation(
+                            BooleanOperationType.BoolIntersect, other);
+                        double firstArea = GetRegionArea(
+                            regions[0], boundaries[0].Elevation - coordinateOffset.Z);
+                        double secondArea = GetRegionArea(
+                            regions[1], boundaries[1].Elevation - coordinateOffset.Z);
+                        double smallerArea = Math.Min(firstArea, secondArea);
+                        double overlapArea = intersection.IsNull
+                            ? 0
+                            : GetRegionArea(
+                                intersection,
+                                boundaries[0].Elevation - coordinateOffset.Z);
+                        double tolerance = Math.Max(
+                            GeometryTolerance, smallerArea * 1e-8);
+                        if (Math.Abs(overlapArea - smallerArea) > tolerance)
+                        {
+                            throw new InvalidOperationException(
+                                "The closed offsets cross instead of forming nested loops.");
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                foreach (Region region in regions)
+                {
+                    region.Dispose();
+                }
+            }
+        }
+
+        private static List<Polyline> CreateBeveledBufferBoundaries(
+            Polyline path,
+            Polyline source,
+            double halfWidth)
+        {
+            List<Point3d> centerlinePoints =
+                SamplePolylineForBuffer(path, halfWidth);
+            if (centerlinePoints.Count < 2)
+            {
+                throw new InvalidOperationException(
+                    "The path does not contain enough points for a bevel repair.");
+            }
+
+            bool closed = path.Closed;
+            List<Point2d> left = CreateBeveledOffsetSide(
+                centerlinePoints, closed, halfWidth, halfWidth * 4.0);
+            List<Point2d> right = CreateBeveledOffsetSide(
+                centerlinePoints, closed, -halfWidth, halfWidth * 4.0);
+            var boundaries = new List<Polyline>();
+            try
+            {
+                if (closed)
+                {
+                    boundaries.Add(CreateBeveledBoundary(
+                        source, left, closed: true));
+                    boundaries.Add(CreateBeveledBoundary(
+                        source, right, closed: true));
+                }
+                else
+                {
+                    var outline = new List<Point2d>(
+                        left.Count + right.Count);
+                    outline.AddRange(left);
+                    for (int index = right.Count - 1; index >= 0; index--)
+                    {
+                        outline.Add(right[index]);
+                    }
+
+                    boundaries.Add(CreateBeveledBoundary(
+                        source, outline, closed: true));
+                }
+
+                if (closed &&
+                    (boundaries.Count != 2 ||
+                     Math.Abs(boundaries[0].Area) <= GeometryTolerance ||
+                     Math.Abs(boundaries[1].Area) <= GeometryTolerance ||
+                     Math.Abs(Math.Abs(boundaries[0].Area) -
+                              Math.Abs(boundaries[1].Area)) <= GeometryTolerance))
+                {
+                    throw new InvalidOperationException(
+                        "The closed path's inner offset collapsed at the requested " +
+                        "marking width; the source was retained.");
+                }
+
+                ValidateOffsetBoundaries(boundaries, closed);
+                return boundaries;
+            }
+            catch
+            {
+                DisposeAllPolylines(boundaries);
+                throw;
+            }
+        }
+
+        private static List<Point2d> CreateBeveledOffsetSide(
+            List<Point3d> centerline,
+            bool closed,
+            double offset,
+            double maximumMiterLength)
+        {
+            int pointCount = centerline.Count;
+            int firstJoint = closed ? 0 : 1;
+            int lastJoint = closed ? pointCount - 1 : pointCount - 2;
+            var result = new List<Point2d>(pointCount * 2);
+
+            if (!closed)
+            {
+                AppendOffsetPoint(
+                    result,
+                    centerline[0],
+                    GetUnitDirection(centerline[0], centerline[1]),
+                    offset);
+            }
+
+            for (int index = firstJoint; index <= lastJoint; index++)
+            {
+                Point3d vertex = centerline[index];
+                Point3d previous = centerline[
+                    (index - 1 + pointCount) % pointCount];
+                Point3d next = centerline[(index + 1) % pointCount];
+                Vector2d incoming = GetUnitDirection(previous, vertex);
+                Vector2d outgoing = GetUnitDirection(vertex, next);
+                Vector2d incomingNormal = GetLeftNormal(incoming);
+                Vector2d outgoingNormal = GetLeftNormal(outgoing);
+                Point2d firstOffset = OffsetPoint(vertex, incomingNormal, offset);
+                Point2d secondOffset = OffsetPoint(vertex, outgoingNormal, offset);
+                double turn = Cross(incoming, outgoing);
+
+                if (Math.Abs(turn) <= GeometryTolerance)
+                {
+                    if (incoming.DotProduct(outgoing) > 0)
+                    {
+                        result.Add(new Point2d(
+                            (firstOffset.X + secondOffset.X) / 2.0,
+                            (firstOffset.Y + secondOffset.Y) / 2.0));
+                    }
+                    else
+                    {
+                        result.Add(firstOffset);
+                        result.Add(secondOffset);
+                    }
+
+                    continue;
+                }
+
+                bool outerSide = turn * offset < 0;
+                if (outerSide ||
+                    !TryGetOffsetLineIntersection(
+                        firstOffset, incoming, secondOffset, outgoing,
+                        out Point2d intersection) ||
+                    intersection.GetDistanceTo(new Point2d(vertex.X, vertex.Y)) >
+                        maximumMiterLength)
+                {
+                    result.Add(firstOffset);
+                    result.Add(secondOffset);
+                }
+                else
+                {
+                    result.Add(intersection);
+                }
+            }
+
+            if (!closed)
+            {
+                AppendOffsetPoint(
+                    result,
+                    centerline[pointCount - 1],
+                    GetUnitDirection(
+                        centerline[pointCount - 2],
+                        centerline[pointCount - 1]),
+                    offset);
+            }
+
+            return result;
+        }
+
+        private static Polyline CreateBeveledBoundary(
+            Polyline source,
+            List<Point2d> points,
+            bool closed)
+        {
+            if (points.Count < (closed ? 3 : 2))
+            {
+                throw new InvalidOperationException(
+                    "The bevel boundary has too few vertices.");
+            }
+
+            var boundary = new Polyline();
+            try
+            {
+                boundary.SetPropertiesFrom(source);
+                boundary.ConstantWidth = 0;
+                boundary.Elevation = source.Elevation;
+                boundary.Normal = Vector3d.ZAxis;
+                for (int index = 0; index < points.Count; index++)
+                {
+                    boundary.AddVertexAt(index, points[index], 0, 0, 0);
+                }
+
+                boundary.Closed = closed;
+                return boundary;
+            }
+            catch
+            {
+                boundary.Dispose();
+                throw;
+            }
+        }
+
+        private static void AppendOffsetPoint(
+            List<Point2d> points,
+            Point3d vertex,
+            Vector2d direction,
+            double offset)
+        {
+            points.Add(OffsetPoint(vertex, GetLeftNormal(direction), offset));
+        }
+
+        private static Point2d OffsetPoint(
+            Point3d point,
+            Vector2d normal,
+            double offset)
+        {
+            return new Point2d(
+                point.X + normal.X * offset,
+                point.Y + normal.Y * offset);
+        }
+
+        private static Vector2d GetUnitDirection(Point3d start, Point3d end)
+        {
+            var direction = new Vector2d(end.X - start.X, end.Y - start.Y);
+            if (direction.Length <= GeometryTolerance)
+            {
+                throw new InvalidOperationException(
+                    "The path contains a zero-length segment.");
+            }
+
+            return direction.GetNormal();
+        }
+
+        private static Vector2d GetLeftNormal(Vector2d direction)
+        {
+            return new Vector2d(-direction.Y, direction.X);
+        }
+
+        private static double Cross(Vector2d first, Vector2d second)
+        {
+            return first.X * second.Y - first.Y * second.X;
+        }
+
+        private static bool TryGetOffsetLineIntersection(
+            Point2d firstPoint,
+            Vector2d firstDirection,
+            Point2d secondPoint,
+            Vector2d secondDirection,
+            out Point2d intersection)
+        {
+            double denominator = Cross(firstDirection, secondDirection);
+            if (Math.Abs(denominator) <= GeometryTolerance)
+            {
+                intersection = Point2d.Origin;
+                return false;
+            }
+
+            var between = new Vector2d(
+                secondPoint.X - firstPoint.X,
+                secondPoint.Y - firstPoint.Y);
+            double parameter = Cross(between, secondDirection) / denominator;
+            intersection = new Point2d(
+                firstPoint.X + parameter * firstDirection.X,
+                firstPoint.Y + parameter * firstDirection.Y);
+            return IsFinite(intersection.X) && IsFinite(intersection.Y);
+        }
+
+        private static List<Point3d> SamplePolylineForBuffer(
+            Polyline path,
+            double halfWidth)
+        {
+            double maximumDeviation = Math.Max(
+                GeometryTolerance,
+                Math.Min(halfWidth * 0.02, 0.01));
+            const int maximumSamplesPerArc = 4096;
+            int segmentCount = path.Closed
+                ? path.NumberOfVertices
+                : path.NumberOfVertices - 1;
+            var points = new List<Point3d>();
+            for (int segmentIndex = 0;
+                 segmentIndex < segmentCount;
+                 segmentIndex++)
+            {
+                double startDistance =
+                    path.GetDistanceAtParameter(segmentIndex);
+                double finishDistance =
+                    path.GetDistanceAtParameter(segmentIndex + 1);
+                double bulge = path.GetBulgeAt(segmentIndex);
+                int subdivisions = 1;
+                if (Math.Abs(bulge) > GeometryTolerance)
+                {
+                    Point3d start = path.GetPoint3dAt(segmentIndex);
+                    Point3d finish = path.GetPoint3dAt(
+                        (segmentIndex + 1) % path.NumberOfVertices);
+                    double chordLength = start.DistanceTo(finish);
+                    double arcRadius = chordLength * (1 + bulge * bulge) /
+                                       (4 * Math.Abs(bulge));
+                    double maximumAngle = Math.PI / 12.0;
+                    if (arcRadius > maximumDeviation)
+                    {
+                        maximumAngle = Math.Min(
+                            maximumAngle,
+                            2.0 * Math.Acos(Math.Max(
+                                -1.0, 1.0 - maximumDeviation / arcRadius)));
+                    }
+
+                    if (!IsFinite(maximumAngle) || maximumAngle <= 0)
+                    {
+                        throw new InvalidOperationException(
+                            "An arc could not be sampled at the requested precision.");
+                    }
+
+                    double sweep = 4.0 * Math.Atan(Math.Abs(bulge));
+                    double required = Math.Ceiling(sweep / maximumAngle);
+                    if (!IsFinite(required) || required > maximumSamplesPerArc)
+                    {
+                        throw new InvalidOperationException(
+                            "An arc requires too many samples for a reliable fallback.");
+                    }
+
+                    subdivisions = Math.Max(1, (int)required);
+                }
+
+                if (points.Count == 0)
+                {
+                    points.Add(path.GetPointAtDist(startDistance));
+                }
+
+                for (int subdivision = 1;
+                     subdivision <= subdivisions;
+                     subdivision++)
+                {
+                    double distance = startDistance +
+                                      (finishDistance - startDistance) *
+                                      subdivision / subdivisions;
+                    Point3d point = path.GetPointAtDist(distance);
+                    if (points[points.Count - 1].DistanceTo(point) >
+                        GeometryTolerance)
+                    {
+                        points.Add(point);
+                    }
+                }
+            }
+
+            if (path.Closed && points.Count > 1 &&
+                points[0].DistanceTo(points[points.Count - 1]) <=
+                GeometryTolerance)
+            {
+                points.RemoveAt(points.Count - 1);
+            }
+
+            return points;
+        }
+
+        private static void DisposeAllPolylines(List<Polyline> polylines)
+        {
+            foreach (Polyline polyline in polylines)
+            {
+                polyline.Dispose();
             }
         }
 
@@ -2640,7 +3397,7 @@ namespace SolidsFromPolylines
             }
         }
 
-        private static Polyline CircleToPolyline(Circle circle)
+        private static Polyline CircleToPolyline(Circle circle, double width)
         {
             if (Math.Abs(Math.Abs(circle.Normal.DotProduct(Vector3d.ZAxis)) - 1.0) >
                 GeometryTolerance)
@@ -2654,15 +3411,29 @@ namespace SolidsFromPolylines
             polyline.Normal = Vector3d.ZAxis;
             polyline.Elevation = circle.Center.Z;
             double radius = circle.Radius;
-            polyline.AddVertexAt(0,
-                new Point2d(circle.Center.X + radius, circle.Center.Y), 1, 0, 0);
-            polyline.AddVertexAt(1,
-                new Point2d(circle.Center.X - radius, circle.Center.Y), 1, 0, 0);
+            double arcBulge = Math.Tan(Math.PI / 6.0);
+            for (int index = 0; index < 3; index++)
+            {
+                double angle = index * (2.0 * Math.PI / 3.0);
+                polyline.AddVertexAt(
+                    index,
+                    new Point2d(
+                        circle.Center.X + radius * Math.Cos(angle),
+                        circle.Center.Y + radius * Math.Sin(angle)),
+                    arcBulge,
+                    0,
+                    0);
+            }
+
             polyline.Closed = true;
+            polyline.ConstantWidth = width;
             return polyline;
         }
 
-        private static Polyline EllipseToPolyline(Ellipse ellipse, double tolerance)
+        private static Polyline EllipseToPolyline(
+            Ellipse ellipse,
+            double tolerance,
+            double width)
         {
             double start = ellipse.StartParam;
             double end = ellipse.EndParam;
@@ -2714,6 +3485,7 @@ namespace SolidsFromPolylines
             }
 
             polyline.Closed = true;
+            polyline.ConstantWidth = width;
             return polyline;
         }
 

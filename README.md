@@ -27,7 +27,9 @@ Commands remain available by name at the Civil 3D command line:
   which is created if needed. Selected lines with overlapping straight
   segments are retained and colored magenta for review. Other source polylines
   are erased only when boundary creation succeeds; failed inputs are retained
-  and colored yellow.
+  and colored yellow. Circles converted by `MARKING_CURVES` use direct
+  concentric-arc geometry for continuous and dashed output, avoiding the
+  general offset and region-repair path.
 - `MARKING_PREP_BATCH` prepares selected polylines or groups from the current
   space by layer, linetype, and width. Its modeless Windows Forms dialog lets
   users continue navigating the drawing, select a group's polylines for visual
@@ -45,10 +47,11 @@ Commands remain available by name at the Civil 3D command line:
   are erased. Uniform per-segment widths are supported. Varying widths are
   flagged and skipped.
 - `MARKING_CURVES` converts selected standalone circles and full ellipses into
-  closed lightweight polylines. Circles use exact arc segments; ellipses use
-  adaptive chord sampling at the requested maximum deviation. Only horizontal
-  circles and full ellipses are supported. Choose whether to keep or delete
-  each source curve; unsupported curves are retained and reported.
+  closed lightweight polylines and asks for a shared positive marking width in
+  drawing units. Circles use three exact arc segments; ellipses use adaptive
+  chord sampling at the requested maximum deviation. Only horizontal circles
+  and full ellipses are supported. Choose whether to keep or delete each source
+  curve; unsupported curves are retained and reported.
 - `MARKING_SOLIDS` opens a Windows Forms surface picker, selecting the first
   surface by default. It samples the chosen surface along each selected
   boundary group at its centroid, then directly extrudes the planar region by
@@ -73,11 +76,17 @@ Commands remain available by name at the Civil 3D command line:
   Nested dynamic blocks and external references inside copied definitions are
   left unchanged.
 
-Line and circular-arc segments are handled by AutoCAD's exact polyline offset
-and region APIs during boundary preparation. Open paths produce capped
+General line and circular-arc segments are handled by AutoCAD's exact polyline
+offset and region APIs during boundary preparation. Open paths produce capped
 boundaries. Closed paths produce inner and outer loops. The preparation command
 supports horizontal WCS polylines with positive constant width; unsupported or
 invalid paths are retained and colored yellow.
+If exact offsets cross, self-intersect, or collapse, preparation tries a
+beveled-offset fallback while preserving the exact offset result whenever it is
+valid. The fallback keeps flat ends on open paths and does not add round joins.
+If the bevel fallback cannot make valid boundaries, the source is retained and
+reported. If a closed path's inner offset collapses at the requested width, the
+source is retained instead of producing a filled boundary.
 
 Codespaces runs Linux and cannot load the plug-in into Civil 3D. Load it into a
 Civil 3D release whose managed host supports .NET 8 and validate runtime
