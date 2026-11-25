@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
+using System.Text.Json;
 using Autodesk.AutoCAD.DatabaseServices;
 using System.Runtime.Versioning;
 using Drawing = System.Drawing;
@@ -81,9 +83,17 @@ namespace SolidsFromPolylines
     {
         private readonly Forms.DataGridView groupsGrid;
         private readonly Forms.Button applyButton;
+        private readonly Forms.Button exportProfileButton;
+        private readonly Forms.Button importProfileButton;
         private readonly Forms.Button refreshButton;
         private readonly Forms.Label statusLabel;
         private readonly Forms.Label summaryLabel;
+        private static readonly JsonSerializerOptions ProfileJsonOptions =
+            new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true,
+                WriteIndented = true
+            };
         private List<Forms.DataGridViewRow> includeRowsBeforeClick;
         private bool includeValueAfterClick;
         private bool syncingIncludeValues;
@@ -193,6 +203,20 @@ namespace SolidsFromPolylines
                 AutoSize = true,
                 Location = new Drawing.Point(14, 500)
             };
+            exportProfileButton = new Forms.Button
+            {
+                Anchor = Forms.AnchorStyles.Bottom | Forms.AnchorStyles.Right,
+                Location = new Drawing.Point(650, 515),
+                Size = new Drawing.Size(96, 30),
+                Text = "Export profile"
+            };
+            importProfileButton = new Forms.Button
+            {
+                Anchor = Forms.AnchorStyles.Bottom | Forms.AnchorStyles.Right,
+                Location = new Drawing.Point(752, 515),
+                Size = new Drawing.Size(96, 30),
+                Text = "Import profile"
+            };
             applyButton = new Forms.Button
             {
                 Anchor = Forms.AnchorStyles.Bottom | Forms.AnchorStyles.Right,
@@ -238,6 +262,8 @@ namespace SolidsFromPolylines
             bulkOutput.SelectedIndexChanged += (_, _) =>
                 UpdateBulkDashGapAvailability(bulkOutput, bulkDash, bulkGap);
             applyButton.Click += (_, _) => ApplySettings();
+            exportProfileButton.Click += (_, _) => ExportProfile();
+            importProfileButton.Click += (_, _) => ImportProfile();
             refreshButton.Click += (_, _) => RefreshRequested?.Invoke();
             groupsGrid.CellContentClick += (_, e) =>
             {
@@ -262,6 +288,8 @@ namespace SolidsFromPolylines
             Controls.Add(groupsGrid);
             Controls.Add(statusLabel);
             Controls.Add(summaryLabel);
+            Controls.Add(exportProfileButton);
+            Controls.Add(importProfileButton);
             Controls.Add(applyButton);
             Controls.Add(cancelButton);
             AcceptButton = applyButton;
@@ -326,6 +354,8 @@ namespace SolidsFromPolylines
                 ? Drawing.Color.DarkGoldenrod
                 : Drawing.SystemColors.ControlText;
             refreshButton.Enabled = true;
+            exportProfileButton.Enabled = !stale;
+            importProfileButton.Enabled = !stale;
             applyButton.Enabled = !stale &&
                 groupsGrid.Rows.Cast<Forms.DataGridViewRow>().Any(
                     row => (row.Tag as BatchPreparationGroup)?.EligibleIds.Count > 0);
@@ -451,6 +481,7 @@ namespace SolidsFromPolylines
                     cell.Value = string.Empty;
                 }
             }
+
         }
 
         private static void UpdateBulkDashGapAvailability(
@@ -517,6 +548,509 @@ namespace SolidsFromPolylines
                 HeaderText = name,
                 Name = name
             };
+        }
+
+        private void ExportProfile()
+        {
+            groupsGrid.CommitEdit(Forms.DataGridViewDataErrorContexts.Commit);
+            groupsGrid.EndEdit();
+
+            var profile = new BatchPreparationProfile
+            {
+                SchemaVersion = 1
+            };
+            var rulesByKey =
+                new Dictionary<string, BatchPreparationProfileRule>(
+                    StringComparer.OrdinalIgnoreCase);
+            var invalidGroups = new List<string>();
+            var conflictingGroups = new List<string>();
+            var conflictingKeys = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+
+            foreach (Forms.DataGridViewRow row in groupsGrid.Rows)
+            {
+                if (row.Tag is not BatchPreparationGroup group ||
+                    group.EligibleIds.Count == 0)
+                {
+                    continue;
+                }
+
+                string outputMode = row.Cells[7].Value?.ToString() ?? string.Empty;
+                bool dashed = string.Equals(
+                    outputMode, "Dash", StringComparison.OrdinalIgnoreCase);
+                if (!dashed &&
+                    !string.Equals(
+                        outputMode, "Continuous", StringComparison.OrdinalIgnoreCase))
+                {
+                    invalidGroups.Add(DescribeLayerWidth(group));
+                    continue;
+                }
+
+                double? dashLength = null;
+                double? gapLength = null;
+                if (dashed)
+                {
+                    if (!TryParsePositive(row.Cells[8].Value, out double parsedDash) ||
+                        !TryParsePositive(row.Cells[9].Value, out double parsedGap))
+                    {
+                        invalidGroups.Add(DescribeLayerWidth(group));
+                        continue;
+                    }
+
+                    dashLength = parsedDash;
+                    gapLength = parsedGap;
+                }
+
+                string key = CreateProfileRuleKey(group.LayerName, group.Width);
+                if (rulesByKey.TryGetValue(
+                        key, out BatchPreparationProfileRule existingRule))
+                {
+                    if (!HasSameOutput(existingRule, outputMode, dashLength, gapLength) &&
+                        conflictingKeys.Add(key))
+                    {
+                        conflictingGroups.Add(DescribeLayerWidth(group));
+                    }
+
+                    continue;
+                }
+
+                rulesByKey.Add(key, new BatchPreparationProfileRule
+                {
+                    LayerName = group.LayerName,
+                    SourceWidth = group.Width,
+                    OutputMode = dashed ? "Dash" : "Continuous",
+                    DashLength = dashLength,
+                    GapLength = gapLength
+                });
+            }
+
+            if (invalidGroups.Count > 0 || conflictingGroups.Count > 0)
+            {
+                var messages = new List<string>();
+                if (invalidGroups.Count > 0)
+                {
+                    messages.Add(
+                        "Set valid positive dash and gap values for these dashed " +
+                        "groups, or choose Continuous:\n" +
+                        FormatEntryList(invalidGroups));
+                }
+
+                if (conflictingGroups.Count > 0)
+                {
+                    messages.Add(
+                        "Rows with the same layer and source width must use the " +
+                        "same output settings:\n" +
+                        FormatEntryList(conflictingGroups));
+                }
+
+                Forms.MessageBox.Show(
+                    this,
+                    string.Join(Environment.NewLine + Environment.NewLine, messages),
+                    "Profile cannot be exported",
+                    Forms.MessageBoxButtons.OK,
+                    Forms.MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (rulesByKey.Count == 0)
+            {
+                Forms.MessageBox.Show(
+                    this,
+                    "There are no processable groups to export.",
+                    "Nothing to export",
+                    Forms.MessageBoxButtons.OK,
+                    Forms.MessageBoxIcon.Information);
+                return;
+            }
+
+            profile.Rules = rulesByKey.Values
+                .OrderBy(rule => rule.LayerName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(rule => rule.SourceWidth)
+                .ToList();
+
+            using (var fileDialog = new Forms.SaveFileDialog
+            {
+                AddExtension = true,
+                DefaultExt = "json",
+                FileName = "BatchPreparationProfile.json",
+                Filter = "Batch preparation profile (*.json)|*.json",
+                OverwritePrompt = true,
+                Title = "Export Batch Preparation Profile"
+            })
+            {
+                if (fileDialog.ShowDialog(this) != Forms.DialogResult.OK)
+                {
+                    return;
+                }
+
+                try
+                {
+                    File.WriteAllText(
+                        fileDialog.FileName,
+                        JsonSerializer.Serialize(profile, ProfileJsonOptions));
+                    Forms.MessageBox.Show(
+                        this,
+                        $"Exported {profile.Rules.Count} layer/width rule(s). " +
+                        "Dash and gap values are stored as drawing-unit numbers " +
+                        "and are used as-is when imported.",
+                        "Profile exported",
+                        Forms.MessageBoxButtons.OK,
+                        Forms.MessageBoxIcon.Information);
+                }
+                catch (UnauthorizedAccessException exception)
+                {
+                    ShowProfileFileError("Unable to write the profile", exception);
+                }
+                catch (IOException exception)
+                {
+                    ShowProfileFileError("Unable to write the profile", exception);
+                }
+            }
+        }
+
+        private void ImportProfile()
+        {
+            groupsGrid.CommitEdit(Forms.DataGridViewDataErrorContexts.Commit);
+            groupsGrid.EndEdit();
+
+            using (var fileDialog = new Forms.OpenFileDialog
+            {
+                CheckFileExists = true,
+                Filter = "Batch preparation profile (*.json)|*.json",
+                Multiselect = false,
+                Title = "Import Batch Preparation Profile"
+            })
+            {
+                if (fileDialog.ShowDialog(this) != Forms.DialogResult.OK)
+                {
+                    return;
+                }
+
+                BatchPreparationProfile profile;
+                try
+                {
+                    profile = JsonSerializer.Deserialize<BatchPreparationProfile>(
+                        File.ReadAllText(fileDialog.FileName),
+                        ProfileJsonOptions);
+                    ValidateProfile(profile);
+                }
+                catch (UnauthorizedAccessException exception)
+                {
+                    ShowProfileFileError("Unable to read the profile", exception);
+                    return;
+                }
+                catch (IOException exception)
+                {
+                    ShowProfileFileError("Unable to read the profile", exception);
+                    return;
+                }
+                catch (System.Text.Json.JsonException exception)
+                {
+                    ShowProfileFileError("The profile is not valid JSON", exception);
+                    return;
+                }
+                catch (InvalidDataException exception)
+                {
+                    ShowProfileFileError("The profile is invalid", exception);
+                    return;
+                }
+
+                ApplyImportedProfile(profile);
+            }
+        }
+
+        private void ApplyImportedProfile(BatchPreparationProfile profile)
+        {
+            var rulesByKey = profile.Rules.ToDictionary(
+                rule => CreateProfileRuleKey(rule.LayerName, rule.SourceWidth),
+                StringComparer.OrdinalIgnoreCase);
+            var matchedRows = new List<Forms.DataGridViewRow>();
+            var matchedRuleKeys = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+            var unmatchedCurrentKeys = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+
+            foreach (Forms.DataGridViewRow row in groupsGrid.Rows)
+            {
+                if (row.Tag is not BatchPreparationGroup group ||
+                    group.EligibleIds.Count == 0)
+                {
+                    continue;
+                }
+
+                string key = CreateProfileRuleKey(group.LayerName, group.Width);
+                if (rulesByKey.ContainsKey(key))
+                {
+                    matchedRows.Add(row);
+                    matchedRuleKeys.Add(key);
+                }
+                else
+                {
+                    unmatchedCurrentKeys.Add(key);
+                }
+            }
+
+            List<BatchPreparationProfileRule> unmatchedProfileRules =
+                profile.Rules.Where(rule =>
+                    !matchedRuleKeys.Contains(
+                        CreateProfileRuleKey(rule.LayerName, rule.SourceWidth)))
+                    .ToList();
+            string preview = BuildImportPreview(
+                profile,
+                matchedRows.Count,
+                matchedRuleKeys,
+                unmatchedProfileRules,
+                unmatchedCurrentKeys);
+            if (matchedRows.Count == 0)
+            {
+                Forms.MessageBox.Show(
+                    this,
+                    preview + Environment.NewLine + Environment.NewLine +
+                    "No processable rows matched; nothing was changed.",
+                    "No matching profile rules",
+                    Forms.MessageBoxButtons.OK,
+                    Forms.MessageBoxIcon.Information);
+                return;
+            }
+
+            if (Forms.MessageBox.Show(
+                    this,
+                    preview + Environment.NewLine + Environment.NewLine +
+                    "Apply the matching rules? Include selections and exception " +
+                    "classifications will remain unchanged.",
+                    "Preview Batch Preparation Profile",
+                    Forms.MessageBoxButtons.YesNo,
+                    Forms.MessageBoxIcon.Question) != Forms.DialogResult.Yes)
+            {
+                return;
+            }
+
+            foreach (Forms.DataGridViewRow row in matchedRows)
+            {
+                var group = (BatchPreparationGroup)row.Tag;
+                BatchPreparationProfileRule rule = rulesByKey[
+                    CreateProfileRuleKey(group.LayerName, group.Width)];
+                bool dashed = string.Equals(
+                    rule.OutputMode, "Dash", StringComparison.OrdinalIgnoreCase);
+
+                group.Dashed = dashed;
+                group.DashLength = rule.DashLength ?? 0;
+                group.GapLength = rule.GapLength ?? 0;
+                row.Cells[7].Value = dashed ? "Dash" : "Continuous";
+                row.Cells[8].Value = dashed
+                    ? rule.DashLength.Value.ToString(
+                        "G", CultureInfo.InvariantCulture)
+                    : string.Empty;
+                row.Cells[9].Value = dashed
+                    ? rule.GapLength.Value.ToString(
+                        "G", CultureInfo.InvariantCulture)
+                    : string.Empty;
+                SetDashGapAvailability(
+                    row, dashed, clearWhenContinuous: true);
+            }
+
+            Forms.MessageBox.Show(
+                this,
+                $"Applied {matchedRuleKeys.Count} profile rule(s) to " +
+                $"{matchedRows.Count} processable row(s). Unmatched rows, " +
+                "Include selections, and exception classifications were unchanged.",
+                "Profile imported",
+                Forms.MessageBoxButtons.OK,
+                Forms.MessageBoxIcon.Information);
+        }
+
+        private static string BuildImportPreview(
+            BatchPreparationProfile profile,
+            int matchedRowCount,
+            HashSet<string> matchedRuleKeys,
+            List<BatchPreparationProfileRule> unmatchedProfileRules,
+            HashSet<string> unmatchedCurrentKeys)
+        {
+            List<BatchPreparationProfileRule> matchedRules = profile.Rules
+                .Where(rule => matchedRuleKeys.Contains(
+                    CreateProfileRuleKey(rule.LayerName, rule.SourceWidth)))
+                .ToList();
+            var lines = new List<string>
+            {
+                $"Profile rules: {profile.Rules.Count}.",
+                $"Matched rules: {matchedRuleKeys.Count}; " +
+                    $"processable rows: {matchedRowCount}.",
+                $"Unmatched profile rules: {unmatchedProfileRules.Count}.",
+                $"Current layer/width groups without a rule: {unmatchedCurrentKeys.Count}."
+            };
+
+            if (matchedRules.Count > 0)
+            {
+                lines.Add(
+                    "Rules to apply:\n" +
+                    FormatEntryList(matchedRules.Select(
+                        rule => DescribeLayerWidth(
+                            rule.LayerName, rule.SourceWidth))));
+            }
+
+            if (unmatchedProfileRules.Count > 0)
+            {
+                lines.Add(
+                    "Profile entries not found in this drawing:\n" +
+                    FormatEntryList(unmatchedProfileRules.Select(
+                        rule => DescribeLayerWidth(
+                            rule.LayerName, rule.SourceWidth))));
+            }
+
+            if (unmatchedCurrentKeys.Count > 0)
+            {
+                lines.Add(
+                    "Processable drawing groups left unchanged:\n" +
+                    FormatEntryList(unmatchedCurrentKeys));
+            }
+
+            lines.Add(
+                "Exception-only rows are not targeted. Dash and gap values are " +
+                "stored as drawing-unit numbers and used as-is in this drawing.");
+            return string.Join(Environment.NewLine, lines);
+        }
+
+        private static void ValidateProfile(BatchPreparationProfile profile)
+        {
+            if (profile == null)
+            {
+                throw new InvalidDataException("The profile file is empty.");
+            }
+
+            if (profile.SchemaVersion != 1)
+            {
+                throw new InvalidDataException(
+                    $"Unsupported profile schema version {profile.SchemaVersion}.");
+            }
+
+            if (profile.Rules == null || profile.Rules.Count == 0)
+            {
+                throw new InvalidDataException(
+                    "The profile contains no layer/width rules.");
+            }
+
+            var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (BatchPreparationProfileRule rule in profile.Rules)
+            {
+                if (rule == null || string.IsNullOrWhiteSpace(rule.LayerName))
+                {
+                    throw new InvalidDataException(
+                        "Every profile rule must have a layer name.");
+                }
+
+                if (double.IsNaN(rule.SourceWidth) ||
+                    double.IsInfinity(rule.SourceWidth) ||
+                    rule.SourceWidth <= 0)
+                {
+                    throw new InvalidDataException(
+                        $"Profile rule for layer '{rule.LayerName}' has an invalid width.");
+                }
+
+                bool continuous = string.Equals(
+                    rule.OutputMode,
+                    "Continuous",
+                    StringComparison.OrdinalIgnoreCase);
+                bool dashed = string.Equals(
+                    rule.OutputMode,
+                    "Dash",
+                    StringComparison.OrdinalIgnoreCase);
+                if (!continuous && !dashed)
+                {
+                    throw new InvalidDataException(
+                        $"Profile rule for layer '{rule.LayerName}' has an unknown output mode.");
+                }
+
+                if (continuous &&
+                    (rule.DashLength.HasValue || rule.GapLength.HasValue))
+                {
+                    throw new InvalidDataException(
+                        $"Continuous profile rule for layer '{rule.LayerName}' " +
+                        "must have null dash and gap values.");
+                }
+
+                if (dashed &&
+                    (!TryParsePositive(rule.DashLength, out _) ||
+                     !TryParsePositive(rule.GapLength, out _)))
+                {
+                    throw new InvalidDataException(
+                        $"Dashed profile rule for layer '{rule.LayerName}' must " +
+                        "have positive finite dash and gap values.");
+                }
+
+                string key = CreateProfileRuleKey(
+                    rule.LayerName, rule.SourceWidth);
+                if (!seenKeys.Add(key))
+                {
+                    throw new InvalidDataException(
+                        $"The profile contains duplicate rules for " +
+                        $"{DescribeLayerWidth(rule.LayerName, rule.SourceWidth)}.");
+                }
+            }
+        }
+
+        private static string CreateProfileRuleKey(string layerName, double width)
+        {
+            return string.Concat(
+                layerName,
+                "\u001f",
+                width.ToString("R", CultureInfo.InvariantCulture));
+        }
+
+        private static bool HasSameOutput(
+            BatchPreparationProfileRule rule,
+            string outputMode,
+            double? dashLength,
+            double? gapLength)
+        {
+            if (!string.Equals(
+                    rule.OutputMode, outputMode, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return string.Equals(
+                    outputMode, "Continuous", StringComparison.OrdinalIgnoreCase) ||
+                (rule.DashLength == dashLength && rule.GapLength == gapLength);
+        }
+
+        private static string DescribeLayerWidth(BatchPreparationGroup group)
+        {
+            return DescribeLayerWidth(group.LayerName, group.Width);
+        }
+
+        private static string DescribeLayerWidth(string layerName, double width)
+        {
+            return $"Layer '{layerName}' / width " +
+                width.ToString("G", CultureInfo.InvariantCulture);
+        }
+
+        private static string FormatEntryList(IEnumerable<string> entries)
+        {
+            List<string> items = entries
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(item => item, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            const int maximumDisplayedEntries = 8;
+            string display = string.Join(
+                Environment.NewLine,
+                items.Take(maximumDisplayedEntries).Select(item => $"- {item}"));
+            if (items.Count > maximumDisplayedEntries)
+            {
+                display += Environment.NewLine +
+                    $"- ... and {items.Count - maximumDisplayedEntries} more";
+            }
+
+            return display;
+        }
+
+        private void ShowProfileFileError(string title, Exception exception)
+        {
+            Forms.MessageBox.Show(
+                this,
+                exception.Message,
+                title,
+                Forms.MessageBoxButtons.OK,
+                Forms.MessageBoxIcon.Error);
         }
 
         private void ApplySettings()
@@ -687,5 +1221,29 @@ namespace SolidsFromPolylines
                     out result) &&
                 !double.IsNaN(result) && !double.IsInfinity(result) && result > 0;
         }
+    }
+
+    internal sealed class BatchPreparationProfile
+    {
+        public BatchPreparationProfile()
+        {
+        }
+
+        public int SchemaVersion { get; set; }
+        public List<BatchPreparationProfileRule> Rules { get; set; } =
+            new List<BatchPreparationProfileRule>();
+    }
+
+    internal sealed class BatchPreparationProfileRule
+    {
+        public BatchPreparationProfileRule()
+        {
+        }
+
+        public string LayerName { get; set; } = string.Empty;
+        public double SourceWidth { get; set; }
+        public string OutputMode { get; set; } = string.Empty;
+        public double? DashLength { get; set; }
+        public double? GapLength { get; set; }
     }
 }

@@ -41,11 +41,17 @@ Commands remain available by name at the Civil 3D command line:
   Ctrl/Shift row selections let users apply the toolbar output and dash/gap
   settings to multiple groups. Toggling Include on a selected row toggles all
   selected rows. Continuous output clears and disables that row's dash/gap
-  cells. Unsupported widths and invalid geometry are summarized by reason;
-  overlaps are checked only among included groups. Exceptions are retained for
-  review, and a confirmation summarizes the operation before source polylines
-  are erased. Closed-path offsets with a clear partial overlap are trimmed with
-  a planar Boolean operation; the generated boundaries are kept, while the
+  cells. JSON profile import/export stores output rules by layer and source
+  width; linetype is ignored, and source width is only a match key.
+  Same-layer/same-width rows must agree before export. Error-only groups and
+  Include state are not stored; import previews unmatched rules and leaves
+  unmatched rows unchanged. Continuous rules store null dash/gap values, while
+  dashed rules require positive values in drawing units and are imported as-is.
+  Unsupported widths and invalid geometry are summarized by reason; overlaps
+  are checked only among included groups. Exceptions are retained for review,
+  and a confirmation summarizes the operation before source polylines are
+  erased. Closed-path offsets with a clear partial overlap are trimmed with a
+  planar Boolean operation; the generated boundaries are kept, while the
   original is retained and colored magenta for review. Uniform per-segment
   widths are supported. Varying widths are flagged and skipped.
 - `MARKING_CURVES` converts selected standalone circles and full ellipses into
