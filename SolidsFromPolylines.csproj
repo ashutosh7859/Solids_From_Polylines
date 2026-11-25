@@ -9,6 +9,9 @@
     <UseWPF>true</UseWPF>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <EnableRibbon Condition="'$(EnableRibbon)' == ''">true</EnableRibbon>
+    <DefineConstants Condition="'$(EnableRibbon)' == 'false'">$(DefineConstants);NO_RIBBON</DefineConstants>
+    <OutputPath Condition="'$(EnableRibbon)' == 'false'">bin\$(Configuration)\NoRibbon\</OutputPath>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="Icons\*_32.png">
@@ -35,7 +38,9 @@
       <Private>False</Private>
     </Reference>
   </ItemGroup>
-  <Target Name="PackageCivil3DAddinBundle" AfterTargets="Build">
+  <Target Name="PackageCivil3DAddinBundle"
+          AfterTargets="Build"
+          Condition="'$(EnableRibbon)' != 'false'">
     <PropertyGroup>
       <Civil3DBundleDir>$(TargetDir)SolidsFromPolylines.bundle</Civil3DBundleDir>
     </PropertyGroup>

@@ -33,12 +33,16 @@ namespace SolidsFromPolylines
                 "MARKING_PREP_BATCH, " +
                 "MARKING_CURVES, " +
                 "MARKING_SOLIDS, MARKING_BLOCK, MARKING_BLOCK_LAYER.");
+#if !NO_RIBBON
             SolidsRibbon.Initialize();
+#endif
         }
 
         public void Terminate()
         {
+#if !NO_RIBBON
             SolidsRibbon.Terminate();
+#endif
         }
 
         [CommandMethod("MARKING_PREP")]
@@ -970,15 +974,15 @@ namespace SolidsFromPolylines
             PromptDoubleResult widthResult = editor.GetDouble(
                 new PromptDoubleOptions("\nEnter marking width: ")
                 {
-                    AllowZero = false,
+                    AllowZero = true,
                     AllowNegative = false
                 });
             if (widthResult.Status != PromptStatus.OK ||
                 !IsFinite(widthResult.Value) ||
-                widthResult.Value <= GeometryTolerance)
+                widthResult.Value < 0)
             {
                 editor.WriteMessage(
-                    "\nMarking width must be a positive finite number.");
+                    "\nMarking width must be a non-negative finite number.");
                 return;
             }
 

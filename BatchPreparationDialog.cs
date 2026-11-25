@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Text.Json;
 using Autodesk.AutoCAD.DatabaseServices;
 using System.Runtime.Versioning;
 using Drawing = System.Drawing;
@@ -88,12 +87,6 @@ namespace SolidsFromPolylines
         private readonly Forms.Button refreshButton;
         private readonly Forms.Label statusLabel;
         private readonly Forms.Label summaryLabel;
-        private static readonly JsonSerializerOptions ProfileJsonOptions =
-            new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true,
-                WriteIndented = true
-            };
         private List<Forms.DataGridViewRow> includeRowsBeforeClick;
         private bool includeValueAfterClick;
         private bool syncingIncludeValues;
@@ -671,9 +664,9 @@ namespace SolidsFromPolylines
             using (var fileDialog = new Forms.SaveFileDialog
             {
                 AddExtension = true,
-                DefaultExt = "json",
-                FileName = "BatchPreparationProfile.json",
-                Filter = "Batch preparation profile (*.json)|*.json",
+                DefaultExt = "xlsx",
+                FileName = "BatchPreparationProfile.xlsx",
+                Filter = "Excel workbook (*.xlsx)|*.xlsx",
                 OverwritePrompt = true,
                 Title = "Export Batch Preparation Profile"
             })
@@ -685,9 +678,8 @@ namespace SolidsFromPolylines
 
                 try
                 {
-                    File.WriteAllText(
-                        fileDialog.FileName,
-                        JsonSerializer.Serialize(profile, ProfileJsonOptions));
+                    BatchPreparationExcelProfile.Write(
+                        fileDialog.FileName, profile);
                     Forms.MessageBox.Show(
                         this,
                         $"Exported {profile.Rules.Count} layer/width rule(s). " +
@@ -705,6 +697,10 @@ namespace SolidsFromPolylines
                 {
                     ShowProfileFileError("Unable to write the profile", exception);
                 }
+                catch (InvalidDataException exception)
+                {
+                    ShowProfileFileError("Unable to write the profile", exception);
+                }
             }
         }
 
@@ -716,7 +712,7 @@ namespace SolidsFromPolylines
             using (var fileDialog = new Forms.OpenFileDialog
             {
                 CheckFileExists = true,
-                Filter = "Batch preparation profile (*.json)|*.json",
+                Filter = "Excel workbook (*.xlsx)|*.xlsx",
                 Multiselect = false,
                 Title = "Import Batch Preparation Profile"
             })
@@ -729,9 +725,8 @@ namespace SolidsFromPolylines
                 BatchPreparationProfile profile;
                 try
                 {
-                    profile = JsonSerializer.Deserialize<BatchPreparationProfile>(
-                        File.ReadAllText(fileDialog.FileName),
-                        ProfileJsonOptions);
+                    profile = BatchPreparationExcelProfile.Read(
+                        fileDialog.FileName);
                     ValidateProfile(profile);
                 }
                 catch (UnauthorizedAccessException exception)
@@ -742,11 +737,6 @@ namespace SolidsFromPolylines
                 catch (IOException exception)
                 {
                     ShowProfileFileError("Unable to read the profile", exception);
-                    return;
-                }
-                catch (System.Text.Json.JsonException exception)
-                {
-                    ShowProfileFileError("The profile is not valid JSON", exception);
                     return;
                 }
                 catch (InvalidDataException exception)
@@ -912,11 +902,6 @@ namespace SolidsFromPolylines
 
         private static void ValidateProfile(BatchPreparationProfile profile)
         {
-            if (profile == null)
-            {
-                throw new InvalidDataException("The profile file is empty.");
-            }
-
             if (profile.SchemaVersion != 1)
             {
                 throw new InvalidDataException(

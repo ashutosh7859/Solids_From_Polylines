@@ -2,18 +2,33 @@
 
 AutoCAD Civil 3D .NET plug-in targeting `net8.0-windows`.
 
-Build `SolidsFromPolylines.csproj`. The build creates
-`bin/Debug/SolidsFromPolylines.bundle`. Copy that entire `.bundle` folder into
-`%AppData%\Autodesk\ApplicationPlugins`, then restart Civil 3D. The plug-in
-loads automatically and creates a **Solids** ribbon tab with a button for each
-command. The ribbon icons are embedded in the DLL. No manual ribbon
-customization is needed.
+Build the ribbon-enabled version with:
 
-A DLL by itself does not make Civil 3D load a plug-in just because it is copied
-to an arbitrary add-in folder. For automatic loading, install the generated
-`.bundle` folder under `ApplicationPlugins`. For a one-time manual load, use
-`NETLOAD` to select the DLL; the Solids tab is created when the ribbon is ready.
-Commands remain available by name at the Civil 3D command line:
+```powershell
+dotnet build SolidsFromPolylines.csproj -c Release
+```
+
+The generated bundle is `bin/Release/SolidsFromPolylines.bundle`. Copy the
+entire `.bundle` folder into
+`%AppData%\Autodesk\ApplicationPlugins`, then restart Civil 3D. It loads
+automatically and creates a **Solids** ribbon tab with a button for each
+command.
+
+To build a commands-only DLL without creating ribbon buttons:
+
+```powershell
+dotnet build SolidsFromPolylines.csproj -c Release -p:EnableRibbon=false
+```
+
+This writes `bin/Release/NoRibbon/SolidsFromPolylines.dll` and does not create a
+bundle. In Civil 3D, run `NETLOAD`, select that DLL, then enter commands by
+name. If you prefer automatic startup for this build, add the DLL to Civil 3D's
+trusted paths and configure it to load at startup; copying a DLL to an
+arbitrary folder alone does not load it. The CAD host provides the AutoCAD,
+Civil 3D, and .NET dependencies for either DLL build.
+
+The ribbon-enabled DLL can also be loaded once with `NETLOAD`; it creates the
+Solids tab when the ribbon is ready. Both builds expose the same commands:
 `MARKING_PREP`, `MARKING_PREP_BATCH`, `MARKING_CURVES`, `MARKING_SOLIDS`,
 `MARKING_BLOCK`, and `MARKING_BLOCK_LAYER`.
 
@@ -41,8 +56,9 @@ Commands remain available by name at the Civil 3D command line:
   Ctrl/Shift row selections let users apply the toolbar output and dash/gap
   settings to multiple groups. Toggling Include on a selected row toggles all
   selected rows. Continuous output clears and disables that row's dash/gap
-  cells. JSON profile import/export stores output rules by layer and source
-  width; linetype is ignored, and source width is only a match key.
+  cells. Excel `.xlsx` profile import/export stores output rules by layer and
+  source width; linetype is ignored, and source width is only a match key.
+  Source widths are stored as text to preserve their exact matching values.
   Same-layer/same-width rows must agree before export. Error-only groups and
   Include state are not stored; import previews unmatched rules and leaves
   unmatched rows unchanged. Continuous rules store null dash/gap values, while
@@ -55,11 +71,12 @@ Commands remain available by name at the Civil 3D command line:
   original is retained and colored magenta for review. Uniform per-segment
   widths are supported. Varying widths are flagged and skipped.
 - `MARKING_CURVES` converts selected standalone circles and full ellipses into
-  closed lightweight polylines and asks for a shared positive marking width in
-  drawing units. Circles use three exact arc segments; ellipses use adaptive
-  chord sampling at the requested maximum deviation. Only horizontal circles
-  and full ellipses are supported. Choose whether to keep or delete each source
-  curve; unsupported curves are retained and reported.
+  closed lightweight polylines and asks for a shared non-negative marking
+  width in drawing units; zero creates a zero-width centerline polyline.
+  Circles use three exact arc segments; ellipses use adaptive chord sampling at
+  the requested maximum deviation. Only horizontal circles and full ellipses
+  are supported. Choose whether to keep or delete each source curve;
+  unsupported curves are retained and reported.
 - `MARKING_SOLIDS` opens a Windows Forms picker, selecting the first surface by
   default, or lets you enable a custom elevation (default 0). Custom elevation
   disables surface selection and is used instead of sampling a surface at each
