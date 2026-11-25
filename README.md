@@ -30,7 +30,8 @@ Civil 3D, and .NET dependencies for either DLL build.
 The ribbon-enabled DLL can also be loaded once with `NETLOAD`; it creates the
 Solids tab when the ribbon is ready. Both builds expose the same commands:
 `MARKING_PREP`, `MARKING_PREP_BATCH`, `MARKING_CURVES`, `MARKING_SOLIDS`,
-`MARKING_BLOCK`, and `MARKING_BLOCK_LAYER`.
+`MARKING_BLOCK`, and `MARKING_BLOCK_LAYER`. Batch dialog actions are invoked
+internally and do not register extra command-line command names.
 
 ## Commands
 

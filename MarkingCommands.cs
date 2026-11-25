@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.Versioning;
+using System.Threading.Tasks;
 using Autodesk.AutoCAD.Colors;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
@@ -253,24 +254,6 @@ namespace SolidsFromPolylines
             activeBatchPreparation = new BatchPreparationSession(
                 document, sourceIds, allPolylinesScope, groups);
             activeBatchPreparation.Show();
-        }
-
-        [CommandMethod("MARKING_PREP_BATCH_REFRESH")]
-        public void RefreshBatchPreparation()
-        {
-            activeBatchPreparation?.Refresh();
-        }
-
-        [CommandMethod("MARKING_PREP_BATCH_SELECT")]
-        public void SelectBatchPreparationGroup()
-        {
-            activeBatchPreparation?.SelectRequestedGroup();
-        }
-
-        [CommandMethod("MARKING_PREP_BATCH_APPLY")]
-        public void ApplyBatchPreparation()
-        {
-            activeBatchPreparation?.Apply();
         }
 
         private static List<BatchPreparationGroup> BuildBatchPreparationGroups(
@@ -805,21 +788,21 @@ namespace SolidsFromPolylines
 
             private void RequestRefresh()
             {
-                QueueCommand("MARKING_PREP_BATCH_REFRESH", "Refreshing groups...");
+                QueueAction(Refresh, "Refreshing groups...");
             }
 
             private void RequestSelectGroup(BatchPreparationGroup group)
             {
                 requestedGroup = group;
-                QueueCommand("MARKING_PREP_BATCH_SELECT", "Selecting group...");
+                QueueAction(SelectRequestedGroup, "Selecting group...");
             }
 
             private void RequestApply()
             {
-                QueueCommand("MARKING_PREP_BATCH_APPLY", "Checking the drawing...");
+                QueueAction(Apply, "Checking the drawing...");
             }
 
-            private void QueueCommand(string command, string message)
+            private void QueueAction(Action action, string message)
             {
                 if (disposed || requestQueued)
                 {
@@ -830,8 +813,31 @@ namespace SolidsFromPolylines
                 dialog.SetBusy(true, message);
                 try
                 {
-                    document.SendStringToExecute(
-                        $"._{command}\n", true, false, true);
+                    _ = ExecuteActionInCommandContextAsync(action);
+                }
+                catch (System.Exception exception)
+                {
+                    CompleteRequest();
+                    ShowError("Unable to start the batch action", exception);
+                }
+            }
+
+            private async Task ExecuteActionInCommandContextAsync(Action action)
+            {
+                try
+                {
+                    await Autodesk.AutoCAD.ApplicationServices.Application
+                        .DocumentManager.ExecuteInCommandContextAsync(
+                            _ =>
+                            {
+                                if (!disposed)
+                                {
+                                    action();
+                                }
+
+                                return Task.CompletedTask;
+                            },
+                            null);
                 }
                 catch (System.Exception exception)
                 {
