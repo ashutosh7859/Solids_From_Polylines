@@ -1087,11 +1087,6 @@ namespace SolidsFromPolylines
 
             Editor editor = document.Editor;
             List<SurfaceChoice> surfaces = GetSurfaces(document.Database);
-            if (surfaces.Count == 0)
-            {
-                editor.WriteMessage("\nThis drawing contains no Civil 3D surfaces.");
-                return;
-            }
 
             PromptDoubleResult heightResult = editor.GetDouble(
                 new PromptDoubleOptions(
@@ -1205,6 +1200,7 @@ namespace SolidsFromPolylines
             // Windows form. Re-entering Editor.GetDouble/GetSelection directly
             // after a modal form closes can destabilize the AutoCAD command loop.
             SurfaceChoice chosenSurface;
+            double? customElevation;
             using (var surfaceDialog = new SurfaceSelectionDialog(surfaces))
             {
                 if (Autodesk.AutoCAD.ApplicationServices.Application
@@ -1213,16 +1209,27 @@ namespace SolidsFromPolylines
                     return;
                 }
 
-                chosenSurface = surfaceDialog.SelectedSurface;
-                if (chosenSurface == null)
+                if (surfaceDialog.UseCustomElevation)
                 {
-                    editor.WriteMessage("\nNo surface was selected.");
-                    return;
+                    chosenSurface = null;
+                    customElevation = surfaceDialog.CustomElevation;
+                }
+                else
+                {
+                    chosenSurface = surfaceDialog.SelectedSurface;
+                    customElevation = null;
+                    if (chosenSurface == null)
+                    {
+                        editor.WriteMessage("\nNo surface was selected.");
+                        return;
+                    }
                 }
             }
 
-            ObjectId surfaceId = chosenSurface.ObjectId;
-            string surfaceName = chosenSurface.Name;
+            ObjectId? surfaceId = chosenSurface?.ObjectId;
+            string elevationSource = customElevation.HasValue
+                ? $"Custom elevation: {customElevation.Value}."
+                : $"Surface: {chosenSurface!.Name}.";
 
             try
             {
@@ -1230,6 +1237,7 @@ namespace SolidsFromPolylines
                     document.Database,
                     selectedIds,
                     surfaceId,
+                    customElevation,
                     heightResult.Value,
                     nestedMode,
                     innerHeight);
@@ -1246,7 +1254,7 @@ namespace SolidsFromPolylines
                     $"\nCreated {creationResult.SolidsCreated} solid(s); " +
                     $"{boundarySelection.Failures.Count + creationResult.Failures.Count} " +
                     "boundary/boundary group(s) were skipped or failed. " +
-                    $"Surface: {surfaceName}. " +
+                    $"{elevationSource} " +
                     "Boundaries were erased only for successful solid groups.");
             }
 
@@ -3498,7 +3506,8 @@ namespace SolidsFromPolylines
         private static SolidCreationResult CreateSolidsForBoundaries(
             Database database,
             List<ObjectId> boundaryIds,
-            ObjectId surfaceId,
+            ObjectId? surfaceId,
+            double? customElevation,
             double height,
             string nestedMode,
             double innerHeight)
@@ -3527,12 +3536,30 @@ namespace SolidsFromPolylines
                     boundaries.Add(boundary);
                 }
 
-                CivilSurface surface = transaction.GetObject(
-                    surfaceId, OpenMode.ForRead) as CivilSurface;
-                if (surface == null)
+                CivilSurface surface = null;
+                if (customElevation.HasValue)
                 {
-                    throw new InvalidOperationException(
-                        "The selected object is no longer a Civil 3D surface.");
+                    if (!IsFinite(customElevation.Value))
+                    {
+                        throw new InvalidOperationException(
+                            "The custom elevation must be finite.");
+                    }
+                }
+                else
+                {
+                    if (!surfaceId.HasValue)
+                    {
+                        throw new InvalidOperationException(
+                            "A surface or custom elevation must be selected.");
+                    }
+
+                    surface = transaction.GetObject(
+                        surfaceId.Value, OpenMode.ForRead) as CivilSurface;
+                    if (surface == null)
+                    {
+                        throw new InvalidOperationException(
+                            "The selected object is no longer a Civil 3D surface.");
+                    }
                 }
 
                 Vector3d coordinateOffset =
@@ -3635,6 +3662,7 @@ namespace SolidsFromPolylines
                                 boundaryRegion,
                                 holes,
                                 surface,
+                                customElevation,
                                 height,
                                 coordinateOffset);
 
@@ -3665,6 +3693,7 @@ namespace SolidsFromPolylines
                                                 hole,
                                                 new List<BoundaryRegion>(),
                                                 surface,
+                                                customElevation,
                                                 innerHeight,
                                                 coordinateOffset);
                                             using (innerSolid)
@@ -3943,6 +3972,7 @@ namespace SolidsFromPolylines
             BoundaryRegion boundaryRegion,
             List<BoundaryRegion> holes,
             CivilSurface surface,
+            double? customElevation,
             double height,
             Vector3d coordinateOffset)
         {
@@ -3975,33 +4005,48 @@ namespace SolidsFromPolylines
 
                 Point2d centroid = GetRegionCentroid(
                     region, boundaryRegion.Elevation);
-                double surfaceElevation;
-                try
+                double baseElevation;
+                if (customElevation.HasValue)
                 {
-                    surfaceElevation = surface.FindElevationAtXY(
-                        centroid.X + coordinateOffset.X,
-                        centroid.Y + coordinateOffset.Y);
+                    baseElevation = customElevation.Value;
                 }
-                catch (System.Exception exception)
+                else
                 {
-                    double worldX = centroid.X + coordinateOffset.X;
-                    double worldY = centroid.Y + coordinateOffset.Y;
-                    throw new InvalidOperationException(
-                        $"The surface has no elevation at the marking-region " +
-                        $"centroid ({worldX}, {worldY}): {exception.Message}",
-                        exception);
+                    if (surface == null)
+                    {
+                        throw new InvalidOperationException(
+                            "A surface or custom elevation must be selected.");
+                    }
+
+                    try
+                    {
+                        baseElevation = surface.FindElevationAtXY(
+                            centroid.X + coordinateOffset.X,
+                            centroid.Y + coordinateOffset.Y);
+                    }
+                    catch (System.Exception exception)
+                    {
+                        double worldX = centroid.X + coordinateOffset.X;
+                        double worldY = centroid.Y + coordinateOffset.Y;
+                        throw new InvalidOperationException(
+                            $"The surface has no elevation at the marking-region " +
+                            $"centroid ({worldX}, {worldY}): {exception.Message}",
+                            exception);
+                    }
                 }
 
-                if (!IsFinite(surfaceElevation))
+                if (!IsFinite(baseElevation))
                 {
                     throw new InvalidOperationException(
-                        "The finished-level surface returned an invalid elevation.");
+                        customElevation.HasValue
+                            ? "The custom elevation is invalid."
+                            : "The finished-level surface returned an invalid elevation.");
                 }
 
                 double worldBoundaryElevation =
                     boundaryRegion.Elevation + coordinateOffset.Z;
                 region.TransformBy(Matrix3d.Displacement(new Vector3d(
-                    0, 0, surfaceElevation - worldBoundaryElevation)));
+                    0, 0, baseElevation - worldBoundaryElevation)));
                 region.TransformBy(Matrix3d.Displacement(coordinateOffset));
 
                 var solid = new Solid3d();
@@ -4613,6 +4658,9 @@ namespace SolidsFromPolylines
     [SupportedOSPlatform("windows")]
     internal sealed class SurfaceSelectionDialog : Forms.Form
     {
+        private readonly Forms.CheckBox customElevationCheckBox;
+        private readonly Forms.NumericUpDown elevationInput;
+
         public SurfaceSelectionDialog(List<SurfaceChoice> surfaces)
         {
             Text = "Select Finished-Level Surface";
@@ -4622,34 +4670,56 @@ namespace SolidsFromPolylines
             MaximizeBox = false;
             MinimizeBox = false;
             AutoScaleMode = Forms.AutoScaleMode.Font;
-            ClientSize = new Drawing.Size(460, 270);
+            ClientSize = new Drawing.Size(460, 320);
 
             var instructionLabel = new Forms.Label
             {
                 AutoSize = true,
                 Location = new Drawing.Point(14, 14),
-                Text = "Choose the finished-level surface to use:"
+                Text = "Choose a finished-level surface or set a custom elevation:"
             };
             var surfaceList = new Forms.ListBox
             {
                 Location = new Drawing.Point(14, 44),
-                Size = new Drawing.Size(432, 170),
+                Size = new Drawing.Size(432, 155),
                 Anchor = Forms.AnchorStyles.Top |
-                    Forms.AnchorStyles.Bottom |
                     Forms.AnchorStyles.Left |
                     Forms.AnchorStyles.Right,
                 DisplayMember = nameof(SurfaceChoice.Name)
             };
+            customElevationCheckBox = new Forms.CheckBox
+            {
+                AutoSize = true,
+                Location = new Drawing.Point(14, 207),
+                Text = "Use custom elevation"
+            };
+            var elevationLabel = new Forms.Label
+            {
+                AutoSize = true,
+                Location = new Drawing.Point(34, 239),
+                Text = "Elevation:"
+            };
+            elevationInput = new Forms.NumericUpDown
+            {
+                DecimalPlaces = 6,
+                Increment = 0.1M,
+                Minimum = decimal.MinValue,
+                Maximum = decimal.MaxValue,
+                Location = new Drawing.Point(105, 235),
+                Size = new Drawing.Size(150, 23),
+                Enabled = false
+            };
             var resultLabel = new Forms.Label
             {
                 AutoSize = true,
-                Location = new Drawing.Point(14, 222),
-                Anchor = Forms.AnchorStyles.Bottom | Forms.AnchorStyles.Left
+                Location = new Drawing.Point(14, 274),
+                Anchor = Forms.AnchorStyles.Bottom | Forms.AnchorStyles.Left,
+                Text = $"{surfaces.Count} surface(s)"
             };
             var okButton = new Forms.Button
             {
                 DialogResult = Forms.DialogResult.OK,
-                Location = new Drawing.Point(290, 230),
+                Location = new Drawing.Point(290, 278),
                 Size = new Drawing.Size(75, 28),
                 Anchor = Forms.AnchorStyles.Bottom | Forms.AnchorStyles.Right,
                 Text = "OK"
@@ -4657,7 +4727,7 @@ namespace SolidsFromPolylines
             var cancelButton = new Forms.Button
             {
                 DialogResult = Forms.DialogResult.Cancel,
-                Location = new Drawing.Point(371, 230),
+                Location = new Drawing.Point(371, 278),
                 Size = new Drawing.Size(75, 28),
                 Anchor = Forms.AnchorStyles.Bottom | Forms.AnchorStyles.Right,
                 Text = "Cancel"
@@ -4665,6 +4735,9 @@ namespace SolidsFromPolylines
 
             Controls.Add(instructionLabel);
             Controls.Add(surfaceList);
+            Controls.Add(customElevationCheckBox);
+            Controls.Add(elevationLabel);
+            Controls.Add(elevationInput);
             Controls.Add(resultLabel);
             Controls.Add(okButton);
             Controls.Add(cancelButton);
@@ -4683,15 +4756,48 @@ namespace SolidsFromPolylines
 
             SelectedSurface = surfaceList.SelectedItem as SurfaceChoice;
             okButton.Enabled = SelectedSurface != null;
-            resultLabel.Text = $"{surfaceList.Items.Count} surface(s)";
+            int previousSurfaceIndex = surfaceList.SelectedIndex;
             surfaceList.SelectedIndexChanged += (_, _) =>
             {
-                SelectedSurface = surfaceList.SelectedItem as SurfaceChoice;
-                okButton.Enabled = SelectedSurface != null;
+                if (!customElevationCheckBox.Checked)
+                {
+                    SelectedSurface = surfaceList.SelectedItem as SurfaceChoice;
+                    okButton.Enabled = SelectedSurface != null;
+                }
+            };
+            customElevationCheckBox.CheckedChanged += (_, _) =>
+            {
+                if (customElevationCheckBox.Checked)
+                {
+                    if (surfaceList.SelectedIndex >= 0)
+                    {
+                        previousSurfaceIndex = surfaceList.SelectedIndex;
+                    }
+
+                    surfaceList.SelectedIndex = -1;
+                    SelectedSurface = null;
+                    surfaceList.Enabled = false;
+                    elevationInput.Enabled = true;
+                }
+                else
+                {
+                    surfaceList.Enabled = true;
+                    elevationInput.Enabled = false;
+                    if (previousSurfaceIndex >= 0 &&
+                        previousSurfaceIndex < surfaceList.Items.Count)
+                    {
+                        surfaceList.SelectedIndex = previousSurfaceIndex;
+                    }
+                }
+
+                okButton.Enabled = customElevationCheckBox.Checked ||
+                    surfaceList.SelectedItem is SurfaceChoice;
             };
         }
 
         public SurfaceChoice SelectedSurface { get; private set; }
+        public bool UseCustomElevation => customElevationCheckBox.Checked;
+        public double CustomElevation => (double)elevationInput.Value;
     }
 
     [SupportedOSPlatform("windows")]

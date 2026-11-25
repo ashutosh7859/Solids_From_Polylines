@@ -112,7 +112,7 @@ namespace SolidsFromPolylines
             GetCollection(panelSource, "Items").Add(CreateButton(
                 ribbonAssembly, "Create\nSolids", "MARKING_SOLIDS",
                 "02_create_solids",
-                "Create 3D solids from marking boundaries on a selected surface."));
+                "Create 3D solids using a finished-level surface or custom elevation."));
             GetCollection(panelSource, "Items").Add(CreateButton(
                 ribbonAssembly, "Block\nSolids", "MARKING_BLOCK",
                 "03_block_solids",

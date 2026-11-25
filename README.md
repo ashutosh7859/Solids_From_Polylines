@@ -54,10 +54,11 @@ Commands remain available by name at the Civil 3D command line:
   chord sampling at the requested maximum deviation. Only horizontal circles
   and full ellipses are supported. Choose whether to keep or delete each source
   curve; unsupported curves are retained and reported.
-- `MARKING_SOLIDS` opens a Windows Forms surface picker, selecting the first
-  surface by default. It samples the chosen surface along each selected
-  boundary group at its centroid, then directly extrudes the planar region by
-  the signed thickness. When nested boundaries are detected, choose whether to
+- `MARKING_SOLIDS` opens a Windows Forms picker, selecting the first surface by
+  default, or lets you enable a custom elevation (default 0). Custom elevation
+  disables surface selection and is used instead of sampling a surface at each
+  selected boundary group's centroid. The planar region is then extruded by the
+  signed thickness. When nested boundaries are detected, choose whether to
   create the existing annular solid (the Enter/default choice), create that
   solid plus a separately thickened inner solid, or skip nested groups while
   processing unrelated boundaries. Open or non-horizontal polylines are
